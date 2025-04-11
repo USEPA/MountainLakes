@@ -1,0 +1,462 @@
+---
+title: "Compile Catchment Metrics"
+author: "Amalia Handler"
+date: "`r format(Sys.time(), '%d %B, %Y')`"
+output: html_document
+editor_options: 
+  chunk_output_type: console
+---
+
+Code used to compile data for the catchments of all lakes sampled in the 2007, 2012, and 2017 National Lakes Assessment.
+
+```{r setup, include = FALSE, echo = F}
+# Load packages and data
+library(tidyr)
+library(sf)
+library(here)
+library(dplyr)
+library(zonal)
+library(terra)
+library(parallel)
+library(magrittr)
+library(rstac)
+library(mapview)
+
+# Directory for large and geospatial files. These files are too large to store locally.
+dsn_loc <- "O:/PRIV/CPHEA/PESD/COR/CORFILES/Geospatial_Library_Projects/AmaliaHandler/Mountain Lakes 2022-2025 Amalia Handler 1035b/NLALakeShapefiles.gpkg"
+
+st_layers(dsn_loc)
+
+# Load shapefiles
+lakes         <- read_sf(dsn = dsn_loc, layer = "LakePolygons")
+catch         <- read_sf(dsn = dsn_loc, layer = "LakeCatchments")
+catch_no_lake <- read_sf(dsn = dsn_loc, layer = "LakeCatchments_WithoutLakes")
+ws            <- read_sf(dsn = dsn_loc, layer = "LakeWatersheds")
+
+# Load the NLCD data from 2011
+nlcd_rast <- rast('O:/PRIV/CPHEA/PESD/COR/CORFILES/Geospatial_Library_Projects/StreamCat/LandscapeRasters/QAComplete/nlcd_2011_land_cover_l48_20210604.tif')
+
+# Read in LakeCat NLCD table to get the IDs of lakes that are in lakecat
+nlcd_lakecat <- readr::read_csv('O:/PRIV/CPHEA/PESD/COR/CORFILES/Geospatial_Library_Projects/LakeCat/FTP_Staging/FinalTables/NLCD2011.csv') |>
+  mutate(in_lakecat = 1) |>
+  select(-inStreamCat)
+
+```
+
+### Perform area checks
+
+```{r}
+# For how many lakes are the catchment and watershed area the same?
+catch$CatchAreaSqKm <- as.numeric(st_area(catch) / 1000^2)
+ws$WsAreaSqKm <- as.numeric(st_area(ws) / 1000^2)
+
+area_test <- catch |>
+  st_drop_geometry() |>
+  select(UNIQUE_ID, CatchAreaSqKm, COMID) |>
+  left_join(select(st_drop_geometry(ws), UNIQUE_ID, WsAreaSqKm), by = join_by(UNIQUE_ID)) |>
+  mutate(catch_ws_prop = CatchAreaSqKm/WsAreaSqKm,
+         same_catch_ws = ifelse(catch_ws_prop >= 1, "YES", "NO"),
+         catch_largerthan_ws = ifelse(catch_ws_prop > 1, "YES", "NO"))
+  
+# For how many is the area the same?
+area_test |>  
+  filter(same_catch_ws == "YES") |>
+  nrow()
+
+# How many have a larger catchment than the watershed?
+area_test |>  
+  filter(catch_ws_prop > 1.0000001) |>
+  nrow()
+
+# How many catchments are very problematically larger than watersheds?
+area_test |>  
+  filter(catch_ws_prop > 2)
+
+# How many are due to minor differences in catchment geometry?
+area_test |>  
+  filter(catch_ws_prop > 1 & catch_ws_prop < 1.01) |>
+  nrow()
+
+```
+
+### Extract the NLCD for each of the lake catchments and watersheds
+
+#### NLA lakes included in LakeCat
+
+```{r extract, include = FALSE, echo = F}
+
+# Testing
+# polys <- catch_no_lake[c(1:3, 162, 326, 753),] # ws[c(1:3, 39, 53, 62),]
+# rast  <- nlcd_rast
+# mode  <- "Cat"
+# year  <- 2011
+
+# polys = sf shapefile of the area for which the extraction should take place
+# rast = raster terra object that contains the NLCD
+# mode = "Cat" or "Ws", is the function running for the catchment or watershed area
+# year = the year of the NLCD data
+extract_nlcd <- function(polys, rast, mode, year){
+  # Crosswalk which lakes are included in LakeCat
+  polys_lakecat <- polys |>
+    st_drop_geometry() |>
+    left_join(select(nlcd_lakecat, COMID, in_lakecat), by = "COMID") |>
+    mutate(in_lakecat = ifelse(is.na(in_lakecat), 0, in_lakecat)) |>
+    select(UNIQUE_ID, COMID, in_lakecat)
+  
+  # Isolate polygons for lakes not in lakecat
+  non_lakecat_ids <- pull(filter(polys_lakecat, in_lakecat == 0), UNIQUE_ID)
+  
+  non_lakecat_polys <- filter(polys, UNIQUE_ID %in% non_lakecat_ids)
+  
+  # Extract NLCD data for the lakes not in LakeCat
+  tab <- terra::extract(rast, non_lakecat_polys, fun = "table", na.rm = TRUE, exact = FALSE)
+  
+  # Generate column names
+  vars <- c("Ow", "Ice", "UrbOp", "UrbLo", "UrbMd", "UrbHi", "Bl", "Decid", "Conif", "MxFst", "Shrb", "Grs", "Hay", "Crop", "WdWet", "HbWet")
+  var_names <- paste0("Pct", vars, year, mode)
+  
+  # Calculate percent area each land use type, rename variables
+  non_lakecat_nlcd <- tab |>
+    as_tibble() |>
+    rowwise() |>
+    mutate(tot_pix = sum(c_across(`Open Water`:`Emergent Herbaceous Wetlands`))) |>
+    ungroup() |>
+    select(-Unclassified, -V2) |>
+    mutate(across(`Open Water`:`Emergent Herbaceous Wetlands`, ~ round(.x /tot_pix * 100, 2))) |>
+    mutate(UNIQUE_ID = non_lakecat_polys$UNIQUE_ID,
+           COMID = non_lakecat_polys$COMID, .after = ID) |>
+    select(-ID, -tot_pix)
+  
+  colnames(non_lakecat_nlcd)[3:18] <- var_names
+  
+  # Join with data for the rest of the lakes data
+  lakecat_nlcd <- polys_lakecat |>
+    filter(in_lakecat == 1) |>
+    left_join(nlcd_lakecat, by = "COMID") |>
+    select(UNIQUE_ID, COMID, ends_with(mode))
+  
+  # Join with data for the rest of the lakes data
+  nlcd <- bind_rows(non_lakecat_nlcd, lakecat_nlcd)
+  
+  return(nlcd)
+}
+
+# Run for the catchments with lakes
+nlcd2011Cat <- extract_nlcd(catch, nlcd_rast, "Cat", 2011)
+
+# Write the catchments NLCD data
+readr::write_csv(nlcd2011Cat, "/inst/data/NLA071217_NLCD2011_Catchment.csv")
+
+# Run for catchments without lakes
+nlcd2011CatNoLake <- extract_nlcd(catch_no_lake, nlcd_rast, "Cat", 2011)
+
+# Write the catchments without lakes NLCD data
+readr::write_csv(nlcd2011CatNoLake, "/inst/data/NLA071217_NLCD2011_CatchmentWithoutLakes.csv")
+
+# Running for watersheds takes a significant amount of time (hrs)
+# Run for watersheds
+nlcd2011Ws <- extract_nlcd(ws, nlcd_rast, "Ws", 2011)
+
+# Write the watersheds NLCD data
+readr::write_csv(nlcd2011Ws, paste0(here(),"/inst/data/NLA071217_NLCD2011_Ws.csv"))
+
+```
+
+
+#### NLA lakes not included in LakeCat
+
+Find the polygons (catchments or watersheds) that are not included in LakeCat.
+
+```{r}
+# Retrieve the areas not included in LakeCat
+get_nla_lakecat_xwalk <- function(polys, lakecat_table){
+  # Add a column identifying the lakes in LakeCat
+  lakecat_table <- mutate(lakecat_table, in_lakecat = TRUE)
+  
+  # Crosswalk NLA sample with LakeCat
+  polys_lakecat <- polys |>
+    st_drop_geometry() |>
+    left_join(select(lakecat_table, COMID, in_lakecat), by = "COMID") |>
+    mutate(in_lakecat = ifelse(is.na(in_lakecat), FALSE, in_lakecat)) |>
+    select(UNIQUE_ID, COMID, in_lakecat)
+  
+  return(polys_lakecat)
+}
+
+```
+
+### Retreiving catchment characteristics using mean zonal statistics
+
+```{r}
+# Location of the rasters for LakeCat data
+data_loc <- 'O:/PRIV/CPHEA/PESD/COR/CORFILES/Geospatial_Library_Projects/StreamCat/LandscapeRasters/QAComplete/'
+
+# Layers to read in
+pop_rast  <- terra::rast(paste0(data_loc, 'POP_SQKM.tif'))
+hden_rast <- terra::rast(paste0(data_loc, 'HU_SQKM.tif'))
+imp_rast  <- terra::rast(paste0(data_loc, "nlcd_2011_land_cover_l48_20210604.tif"))
+rck_rast  <- terra::rast(paste0(data_loc, "rckdep.tif"))
+run_rast  <- terra::rast(paste0(data_loc, "runoff.tif"))
+hyd_rast  <- terra::rast(paste0(data_loc, "perm20mar14.tif"))
+
+# Calculate and save zonal stats for the catchments and the watersheds
+get_zonal_mean <- function(rast_layer, poly_catch, poly_ws, layer_name, new_nameCat, new_nameWs, file_name){
+  # Calculate the means for each polygon type
+  res_ws    <- zonal::execute_zonal(data = rast_layer, geom = poly_ws, ID = c('UNIQUE_ID', "COMID"), fun = "mean")
+  res_catch <- zonal::execute_zonal(data = rast_layer, geom = poly_catch, ID = c('UNIQUE_ID', "COMID"), fun = "mean")
+  
+  # Join the two results and write out to a csv
+  res_catch |>
+    st_drop_geometry() |>
+    rename(new_nameCat = all_of(layer_name)) |>
+    select(UNIQUE_ID, COMID, new_nameCat) |>
+    left_join(select(st_drop_geometry(res_ws), UNIQUE_ID, layer_name), by = "UNIQUE_ID") |>
+    rename(new_nameWs = all_of(layer_name)) |>
+    readr::write_csv(paste0("./inst/data/", file_name, ".csv"))
+}
+
+# Population density
+get_zonal_mean(rast_layer = pop_rast, poly_catch = catch, poly_ws = ws, 
+               layer_name = "mean.POP_SQKM", new_nameCat = "POPDEN2010Cat", new_nameWs = "POPDEN2010Ws", 
+               file_name = "NLA071217_POPDEN2010")
+
+# Housing unit density
+get_zonal_mean(rast_layer = hden_rast, poly_catch = catch, poly_ws = ws, 
+               layer_name = "mean.HU_SQKM", new_nameCat = "HUDEN2010Cat", new_nameWs = "HUDEN2010Ws", 
+               file_name = "NLA071217_HUDEN2010")
+
+# Impervious surfaces
+get_zonal_mean(rast_layer = imp_rast, poly_catch = catch, poly_ws = ws, 
+               layer_name = "mean.NLCD.Land.Cover.Class", new_nameCat = "Imp2011Cat", new_nameWs = "Imp2011Ws", 
+               file_name = "NLA071217_IMPSFC2011")
+
+# Runoff
+get_zonal_mean(rast_layer = run_rast, poly_catch = catch, poly_ws = ws, 
+               layer_name = "mean.avg71_00", new_nameCat = "RunoffCat", new_nameWs = "RunoffWs", 
+               file_name = "NLA071217_RUNOFF_AVE_1971_2000")
+
+# Hydraulic conductivity
+get_zonal_mean(rast_layer = hyd_rast, poly_catch = catch, poly_ws = ws, 
+               layer_name = "mean.perm20mar14", new_nameCat = "HydrlCondCat", new_nameWs = "HydrlCondWs", 
+               file_name = "NLA071217_HYDROCOND2014")
+
+# Depth to bedrock
+get_zonal_mean(rast_layer = rck_rast, poly_catch = catch, poly_ws = ws, 
+               layer_name = "mean.rckdep", new_nameCat = "RckdepCat", new_nameWs = "RckdepWs", 
+               file_name = "NLA071217_RCKDEPTH")
+
+```
+
+
+### Lake elevation and catchment slope
+
+```{r}
+library(elevatr)
+
+# Get points within the lakes
+lake_pts <- st_point_on_surface(lakes)
+
+# Retrieve the elevation of each of the points
+start <- Sys.time()
+
+elev <- do.call(rbind, lapply(1:nrow(lake_pts), function(i){
+  print(i)
+  pt_elev <- get_elev_point(lake_pts[i,], src = "aws", z = 12)
+  readr::write_csv(st_drop_geometry(select(pt_elev, UNIQUE_ID, elevation)), 
+                   paste0(data_dir, "/inst/data/NLA_Lake_Elevations.csv"), 
+                   append = T)
+}))
+
+# Retrieve the slope of each catchment (need to decide if we're using the catchment with or without the lake)
+slope <- do.call(rbind, lapply(3:nrow(catch_no_lake), function(i){
+  print(i)
+  # The area for which slope is to be retrieved
+  area_poly <- catch_no_lake[i,]
+  
+  # Get the raster DEM
+  dem <- get_elev_raster(area_poly, src = "aws", z = 9)
+  
+  # Derive the slope
+  slope <- raster::terrain(dem, opt = c("slope"), unit='degrees')
+  
+  # Convert slope 
+  # slope_deg <- slope*(100/360)
+  
+  # Calculate the mean slope
+  mean_slope <- terra::extract(slope, area_poly, fun = mean, na.rm = TRUE, exact = FALSE)
+  
+  # Result
+  res <- data.frame(UNIQUE_ID = catch$UNIQUE_ID[i], mean_slope)
+  
+  # Write out the results
+  readr::write_csv(res, paste0(data_dir, "/inst/data/NLA_Catch_MeanSlope.csv"), append = T)
+}))
+
+end <- Sys.time()
+
+end - start
+beepr::beep()
+
+```
+
+### Watershed area, lake area, max lake depth, and lake centroids
+
+```{r}
+# Calculate the area for each set of polygons
+catch$CatchAreaSqKm <- as.numeric(st_area(catch) / 1000^2)
+lakes$LakeAreaSqKm  <- as.numeric(st_area(lakes) / 1000^2)
+
+# Get the lake centroids
+lake_pts <- st_point_on_surface(lakes) |>
+  select(UNIQUE_ID, geom)
+
+# Read in lake depth information from the NLA
+nla_dat <- readr::read_csv(paste0(here(), "/inst/data/NLA071217_NLALakeMaxDepth.csv"))
+
+# Filter to the most recent maximum depth measurement
+lake_dep <- nla_dat |>
+  group_by(UNIQUE_ID) |>
+  filter(VISIT_NO == min(VISIT_NO)) |>
+  filter(DSGN_CYCLE == max(DSGN_CYCLE)) |>
+  select(UNIQUE_ID, MAXDEPTH)
+
+# Merge the data. There are two rows for NLA_NV-10003, both 2007, both visit 1. For one the depth is 1 m and the other the depth is 1.2 m. Will arbitrarily choose one to include in the final data.
+# Find the typical distance between lake and catchment boundary
+area_depth <- lake_pts |>
+  left_join(select(st_drop_geometry(catch), UNIQUE_ID, CatchAreaSqKm), by = "UNIQUE_ID") |>
+  left_join(select(st_drop_geometry(lakes), UNIQUE_ID, LakeAreaSqKm), by = "UNIQUE_ID") |>
+  left_join(lake_dep, by = "UNIQUE_ID") |>
+  filter(!(UNIQUE_ID == "NLA_NV-10003" & MAXDEPTH == 1)) |>
+  mutate(catch_radius = sqrt(CatchAreaSqKm/pi), # Estimate catchment radius in km
+         lake_radius = sqrt(LakeAreaSqKm/pi), # Estimate lake radius in km
+         lake_cat_dist = (catch_radius - lake_radius) * 1000) |> # Estimate mean distance between lake boundary and catchment in m
+  relocate(geom, .after = lake_cat_dist)
+  
+```
+
+### Protected areas database
+
+```{r}
+# Protected areas data. PADUS data from Marc
+padus <- readr::read_csv("./inst/data/PADUS_categories_mtn_lakes.csv")
+
+# What are the largest categories?
+padus |>
+  group_by(category) |>
+  summarise(sum_pct_area = sum(PctAreaProtectedCategory)) |>
+  arrange(desc(sum_pct_area))
+
+# Note that these areas can overlap with each other. There are catchments that are 100% National Forest and 100% Wilderness Area
+# Note also that only lake catchments that intersect a PADUS category will appear in this data. Need to manually add in the catchments that are not included.
+nla_padus <- padus |>
+  filter(category %in% c("National Forest", "Wilderness Area", "National Public Lands")) |>
+  mutate(category = case_when(category == "National Forest" ~ "pct_nat_forest",
+                              category == "National Public Lands" ~ "pct_nat_public_land",
+                              category == "Wilderness Area" ~ "pct_wilderness",
+                              TRUE ~ category)) |>
+  pivot_wider(id_cols = UNIQUE_ID, names_from = category, values_from = PctAreaProtectedCategory, values_fill = 0) |>
+  full_join(select(st_drop_geometry(catch), UNIQUE_ID), by = "UNIQUE_ID") |>
+  replace_na(list(pct_nat_forest = 0, pct_nat_public_land = 0, pct_wilderness = 0))
+
+```
+
+
+### Compile all catchment metrics
+
+```{r}
+
+# Note that currently (2024-05-14), there are two NLA_ND_10178 in the watershed shapefile, though one is located in ND and the other in TX. Also, NLA_ND-10157 appears in the catch file, but not in the watershed file. Hopefully these two issues will be resolved with Marc's updates.
+
+# Load all processed data
+# Annoyingly, could not get the new column names to stick in the zonal means
+nlcd11Cat <- readr::read_csv("./inst/data/NLA071217_NLCD2011_Catchment.csv")
+nlcd11Ws  <- readr::read_csv("./inst/data/NLA071217_NLCD2011_Ws.csv")
+
+# Impervious surfaces
+imp_sfc   <- readr::read_csv("./inst/data/NLA071217_IMPSFC2011.csv")|>
+  rename(Imp2011Cat = new_nameCat, Imp2011Ws = new_nameWs)
+
+# Population and housing unit density
+popden  <- readr::read_csv("./inst/data/NLA071217_POPDEN2010.csv") |>
+  rename(POPDEN2010Cat = new_nameCat, POPDEN2010Ws = new_nameWs)
+huden   <- readr::read_csv("./inst/data/NLA071217_HUDEN2010.csv") |>
+  rename(HUDEN2010Cat = new_nameCat, HUDEN2010Ws = new_nameWs)
+
+# Mean annual runoff, depth to bedrock, and hydraulic conductivity
+runoff  <- readr::read_csv("./inst/data/NLA071217_RUNOFF_AVE_1971_2000.csv") |>
+  rename(RunoffCat = new_nameCat, RunoffWs = new_nameWs)
+rckdep  <- readr::read_csv("./inst/data/NLA071217_RCKDEPTH.csv") |>
+  rename(RckdepCat = new_nameCat, RckdepWs = new_nameWs) |>
+  # The depth to bedrock should be converted from cm to m
+  mutate(RckdepWs = RckdepWs / 100,
+         RckdepCat = RckdepCat / 100,)
+hydcond <- readr::read_csv("./inst/data/NLA071217_HYDROCOND2014.csv") |>
+  rename(HydrlCondCat = new_nameCat, HydrlCondWs = new_nameWs)
+
+# Lake elevation and catchment mean slope
+elev  <- readr::read_csv(paste0(here(), "/inst/data/NLA_Lake_Elevations.csv"))
+slope <- readr::read_csv(paste0(here(), "/inst/data/NLA_Catch_MeanSlope.csv"))
+
+# Micorsoft building footprints building count compiled by Marc Weber for the 2007, 2012, and 2017 NLA lake catchments that does not include the lake polygon (catchment without lake)
+msbf <- readr::read_csv("./inst/data/NLA_MSBuildingFootprints_CatchmentNoLake.csv")
+
+# Natural versus man-made lakes
+lake_orig <- readr::read_csv("./inst/data/NLA071217_LakeIDs_withLAKE_ORGN.csv")
+
+# Bind together all data
+# Note this have three more rows than expected
+metrics <- area_depth |>
+  left_join(nlcd11Cat, by = "UNIQUE_ID") |>
+  left_join(select(nlcd11Ws, -COMID), by = c("UNIQUE_ID")) |>
+  left_join(select(imp_sfc, -COMID), by = c("UNIQUE_ID")) |>
+  left_join(select(popden, -COMID), by = c("UNIQUE_ID")) |>
+  left_join(select(huden, -COMID), by = c("UNIQUE_ID")) |>
+  left_join(select(runoff, -COMID), by = c("UNIQUE_ID")) |>
+  left_join(select(rckdep, -COMID), by = c("UNIQUE_ID")) |>
+  left_join(select(hydcond, -COMID), by = c("UNIQUE_ID")) |>
+  left_join(elev, by = "UNIQUE_ID") |>
+  left_join(slope, by = "UNIQUE_ID") |>
+  left_join(nla_padus, by = "UNIQUE_ID") |>
+  left_join(msbf, by = "UNIQUE_ID") |>
+  left_join(lake_orig, by = "UNIQUE_ID") |>
+  left_join(area_depth, by = "UNIQUE_ID")
+
+```
+
+### Join with mountain lake designations
+
+```{r}
+# Mountain pixels found for the catchment area without the lakes
+mtn_catch_no_lake <- readr::read_csv(file = paste0(here(), "/inst/data/NLA_integrated_sample_mtnlakes_catch_no_lake_buffer.csv"))
+  
+# Join the multiple data sources 
+mtn05pct <- mtn_catch_no_lake |>
+  rename(UNIQUE_ID = unique_id) |>
+  # Identify the mountain lakes that have at least 5% mtn area within catchments (without lakes)
+  mutate(mtn_pix_sum = low_mtn_pix + high_mtn_pix,
+         perc_mtn_pix = mtn_pix_sum/tot_crop_pix,
+         desig = ifelse(perc_mtn_pix >= 0.05, "MTN_LAKE", "NOT_MTN_LAKE"))
+
+# Join the watershed metrics data
+mtn <- metrics |>
+  left_join(mtn05pct, by = "UNIQUE_ID") |>
+  relocate(COMID, .after = UNIQUE_ID) |>
+  relocate(CatchAreaSqKm:geom, .after = LAKE_ORGN) |>
+  # Summarize low, med, and high development into a single development variable. Ensure that the mountain designation for each observation is an ordered factor variable.
+  mutate(PctDevCat = PctUrbLo2011Cat + PctUrbMd2011Cat + PctUrbHi2011Cat,
+         PctDevWs = PctUrbLo2011Ws + PctUrbMd2011Ws + PctUrbHi2011Ws, .after = PctHbWet2011Ws) |>
+  mutate(desig = factor(desig, levels = c("MTN_LAKE", "NOT_MTN_LAKE"))) |>
+  # Arrange by the designation variable to have mtn lakes be plotted last, and therefore on top of non-mountain lakes.
+  arrange(desc(desig))
+
+# Check how much data is missing
+missing_data <- mtn |>
+  summarize_all(funs(sum(is.na(.)))) |>
+  pivot_longer(UNIQUE_ID:PctDevWs, names_to = "variable", values_to = "num_missing")
+# Missing 16 lakes depth and 1 count of buildings. Pretty complete!
+
+# Write out the data for analysis
+usethis::use_data(mtn, overwrite = TRUE)
+
+```
+

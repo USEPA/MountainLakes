@@ -1,0 +1,217 @@
+---
+title: "Pet Lakes Example"
+author: "Amalia Handler"
+date: "2024-01-06"
+output: html_document
+editor_options: 
+  chunk_output_type: console
+---
+
+Purpose of this script is to compile a list of commonly studied or identified mountain lakes across the US, run these lakes through the mountain lake identification process, and assess which of the lakes are deemed "mountain lakes" via the process I developed.
+
+```{r load packages, echo = F, include = F, message = F, warning = F}
+library(dplyr)
+library(sf)
+library(mapview)
+library(nhdplusTools)
+library(DT)
+library(here)
+```
+
+
+List compiled with the help of Lara Jansen
+
+###### List of pet mountain lakes
+* Castel lake, CA
+* Lake Tahoe, CA
+* Crater Lake, OR
+* Loch Vale watershed (CO), including:
+**   The Loch
+**   Sky Pond
+* Flathead Lake, MT
+* Bear Tooth Lake, WY
+* Lake Placid, NY
+* Lake George, NY
+* Lake Champlain, NY
+* Lake Powell, AZ
+* Lake Winnippesaukee, NH
+* Lake Sunapee, NH
+* Lake Coeur d'Alene, ID
+* Lake Pend Oreille, ID
+* Mountain Lake, VA
+* Hoh Lake, Olympics WA
+* Emerald Lake, CA
+* Mowich Lake, Mt Raineir, WA
+* Upper Carrol Lake, UT
+* Mirror Lake, NH (Hubbard Brook)
+
+NHDPlus waterbody COMIDs were retrieved by searching lake name in the WATER GeoViewer
+https://www.epa.gov/waterdata/waters-geoviewer
+
+```{r get lake boundaries, echo = F, include = F}
+# Spatial data directory
+dir <- "O:/PRIV/CPHEA/PESD/COR/CORFILES/Geospatial_Library_Projects/AmaliaHandler/Mountain Lakes 2022-2025 Amalia Handler 1035b/"
+
+# Retrieve waterbodies from NHDPlus
+pet_in <- readr::read_csv("./inst/data/Pet_lake_comids.csv")
+
+pets <- get_waterbodies(id = pet_in$COMID)
+
+# Note that the name Harrison Slough is returned for Coeur d’Alene Lake
+
+# Read in LakeCat NLCD table to get the IDs of lakes that are in lakecat
+nlcd_lakecat <- readr::read_csv('O:/PRIV/CPHEA/PESD/COR/CORFILES/Geospatial_Library_Projects/LakeCat/FTP_Staging/FinalTables/NLCD2011.csv')
+
+# Which of the pet mountain lakes are included in LakeCat?
+
+# Add a column identifying the lakes in LakeCat
+lakecat_table <- mutate(nlcd_lakecat, in_lakecat = TRUE)
+
+# Crosswalk NLA sample with LakeCat
+pets |>
+  st_drop_geometry() |>
+  left_join(select(lakecat_table, COMID, in_lakecat), by = c("comid" = "COMID")) |>
+  mutate(in_lakecat = ifelse(is.na(in_lakecat), FALSE, in_lakecat)) |>
+  select(comid, in_lakecat)
+
+# Good news! They are all in LakeCat!
+```
+
+
+```{r compile catchments, echo = F, eval = F}
+
+# LakeCat off-network catchments
+off_net_cats <- read_sf('O:/PRIV/CPHEA/PESD/COR/CORFILES/Geospatial_Library_Projects/LakeCat/FTP_Staging/Framework/LkCat_Frame_min/shps/allBasins.shp')
+
+pet_off_net <- filter(off_net_cats, COMID %in% pet_in$COMID)
+
+# On-network 
+# Compiled from StreamCat
+
+# COMIDs for the on-network lakes
+pet_on_net <- pet_in$COMID[!pet_in$COMID %in% pet_off_net$COMID]
+
+# Filter to lakes in the example ecoregions that are presumed on the network
+on_net <- lakecat_table |>
+  filter(COMID %in% pet_on_net) |>
+  select(COMID, inStreamCat)
+
+# Check how many lakes this identified. Will be less than those in the NHD due to some size dependencies.
+table(on_net$inStreamCat, exclude = NULL)
+
+# Get the corresponding catchment IDs for lakes
+lookup_dir <- 'O:/PRIV/CPHEA/PESD/COR/CORFILES/Geospatial_Library_Projects/LakeCat/LakeCat_Framework/joinTables'
+
+lookup <- list.files(lookup_dir, full.names = TRUE) |>  
+    purrr::map_dfr(readr::read_csv)
+
+# Only keep network COMIDs that have a corresponding lake WBAREACOMID
+on_net_wbcomid <- filter(lookup, wbCOMID %in% on_net$COMID)
+
+# Gather the NHDPlus catchments for these lakes
+
+# Read in catchments and flowlines from NHDPlusV21
+loc_gdb <- 'O:/PRIV/CPHEA/PESD/COR/CORFILES/Geospatial_Library_Resource/Physical/HYDROLOGY/NHDPlusV21/NHDPlusNationalData/NHDPlusV21_National_Seamless_Flattened_Lower48.gdb'
+
+# These will take a long time to read in
+cats       <- read_sf(dsn = loc_gdb, layer = 'Catchment')
+flowlines  <- read_sf(dsn = loc_gdb, layer = 'NHDFlowline_Network')
+
+# Filter to the flowlines and catchments that are on-network and in the example ecoregions
+flow_ex_lakes <- filter(flowlines, WBAREACOMI %in% on_net_wbcomid$wbCOMID)
+
+cats$wbCOMID <- lookup$wbCOMID[match(cats$FEATUREID, lookup$catCOMID)]
+cats_filt    <- filter(cats, FEATUREID %in% flow_ex_lakes$COMID)
+
+cats_filt$wbCOMID <- flow_ex_lakes$WBAREACOMI[match(cats_filt$FEATUREID, flow_ex_lakes$COMID)]
+
+# Resolve invalid geometry
+cats_valid <- cats_filt  |>  
+  st_make_valid(cats_filt) |>
+  group_by(wbCOMID)  |> 
+  summarise(AreaSqKM = sum(AreaSqKM))
+
+# Check that the wbCOMIDs are the same as the lake COMIDs
+on_net$COMID[!on_net$COMID %in% cats_valid$wbCOMID]
+
+# Marry the on and off network catchments, then write out a shapefile
+clean_offnet <- pet_off_net |>
+  select(COMID, AreaSqKM, geometry) |>
+  rename(wbCOMID = COMID) |>
+  mutate(on_network = FALSE, .after = wbCOMID)
+
+clean_onnet <- cats_valid |>
+  mutate(on_network = TRUE, .after = wbCOMID) |>
+  rename(geometry = Shape) |>
+  st_transform(st_crs(clean_offnet))
+
+cats_combine <- rename(bind_rows(clean_offnet, clean_onnet), COMID = wbCOMID)
+
+# Write the combined file
+st_write(cats_combine, paste0(dir, "ExampleMtnLakes.gpkg"), layer = "ExampleMtnLakeCatchments")
+
+# Write out the lake geometry
+st_write(pets, dsn = paste0(dir, "ExampleMtnLakes.gpkg"), layer = "ExampleMtnLakePolygons"))
+
+# Use the above file to run the IdentifyMountainLakes.Rmd script
+
+# Write the file with just the catchment areas to the data location on the C drive
+readr::write_csv(st_drop_geometry(cats_combine), "/inst/data/Pet_lake_catchment_area.csv")
+
+```
+
+
+```{r compile processed data, echo = F, eval = F, include = F}
+# Read file names
+files <- list.files(paste0(data_dir, "/data/pet_mountain_lakes"), pattern = "lake_", full.names = T)
+
+# Create a master df with all data
+pet_lakes <- do.call(rbind, lapply(files, readRDS))
+
+# Write the data to csv for analysis
+readr::write_csv(pet_lakes, "./inst/data/Pet_mountain_lakes_output.csv") 
+readr::write_csv(pet_lakes, "./inst/data/Pet_mountain_lakes_polygons.csv") 
+```
+
+
+How much of the pet mountain lake catchments are designated as "mountainous" according to the landforms file?
+
+```{r, echo = F, message=F, warning=F}
+# Load the process for the pet lakes catchments (note these include the lake area)
+pet_catch <- readr::read_csv(paste0(here(), "/inst/data/Pet_mountain_lakes_output.csv"))
+
+pet_input <- readr::read_csv(paste0(here(), "/inst/data/Pet_lake_comids.csv")) |>
+  mutate(name = ifelse(COMID == 24381227, "Coeur d'Alene Lake", name),
+         range = ifelse(COMID == 24381227, "Shelkirk & Coeur d'Alene", range))
+
+catch_area <- readr::read_csv(paste0(here(), "/inst/data/Pet_lake_catchment_area.csv"))
+
+# Output of the process for just the pet mountain lake polygons (does not include any of the catchment area)
+pet_lakes <- readr::read_csv(paste0(here(), "/inst/data/Pet_mountain_lakes_polygons.csv"))
+
+# Proportion of the catchment that is mountain area
+# pet_lakes <- pet_catch |>
+#   mutate(percent_mtn_area = round(((low_mtn_pix + high_mtn_pix)/tot_crop_pix) * 100, 0))
+
+# Now removed the lake area from the catchment area (note that the two dataframes are ordered the same)
+mtn_pix_no_lake <- (pet_catch$low_mtn_pix + pet_catch$high_mtn_pix) - (pet_lakes$low_mtn_pix + pet_lakes$high_mtn_pix)
+tot_pix_no_lake <- pet_catch$tot_crop_pix - pet_lakes$tot_crop_pix
+pet_no_lake <- tibble(comid = pet_lakes$unique_id, mtn_pix = mtn_pix_no_lake, tot_pix = tot_pix_no_lake)
+
+# Join with lake names
+pet <- pet_no_lake |>
+  mutate(pct_mtn_area = round(mtn_pix/tot_pix * 100), 0) |>
+  select(comid, pct_mtn_area) |>
+  left_join(pet_input, by = c("comid" = "COMID")) |>
+  arrange(range) |>
+  select(-comid) |>
+  relocate(name, state, range, pct_mtn_area, citation)
+
+
+datatable(pets, caption = htmltools::tags$caption("Pet Mountain Lakes", style='color:black; font-size: 20px; text-align:left')) %>%
+  DT::formatStyle(columns = names(pet), fontSize = "75%")
+
+usethis::use_data(pet)
+
+```
+

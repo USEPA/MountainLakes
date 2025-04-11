@@ -1,0 +1,382 @@
+---
+title: "Identify Mountain Lakes"
+author: "Amalia Handler"
+date: "`r format(Sys.time(), '%d %B, %Y')`"
+output: html_document
+editor_options: 
+  chunk_output_type: console
+---
+
+## Script Purpose and Background
+
+Goal of the script it to identify which lakes in the combined 2007, 2012, and 2017 NLA are mountain lakes.
+
+Mountaneous areas are identified by the ESRI Living Atlas Landforms data with 10 classes. The data citation and location follows: 
+
+Sayre, R., Comer, P., Cress, J.J., and Warner, H., 2009, Conterminous United States Terrestrial Ecosystems: U.S. Geological Survey data release, https://doi.org/10.5066/P94VQO8E.
+
+### Process
+
+Function to identify mountain lakes. Identifies any low or high mountain pixels within a given buffer distance from the lake boundary.
+
+```{r, echo = F, message = FALSE, warning = FALSE}
+# Load packages
+library(sf)
+library(stars)
+library(dplyr)
+library(readr)
+library(mapview)
+library(tidyr)
+library(here)
+
+```
+
+Only lakes sampled in the 2007, 2012, and 2017 NLA are included that have a corresponding sample weight.
+
+```{r echo = F}
+# Large data directory for this project (Stored on D drive to avoid OneDrive issues). Note that this directory is backed up daily to the following location on the O drive: O:\PRIV\CPHEA\PESD\COR\CORFILES\Geospatial_Library_Projects\AmaliaHandler\MountainLakes_backup\data
+data_dir <- "D:/MountainLakes"
+
+dir <- "O:/PRIV/CPHEA/PESD/COR/CORFILES/Geospatial_Library_Projects/AmaliaHandler/Mountain Lakes 2022-2025 Amalia Handler 1035b/"
+
+# Shapefiles geopackage
+dsn_loc <- paste0(dir, "NLALakeShapefiles.gpkg")
+st_layers(dsn_loc)
+
+# Load shapefiles
+# Load polygons from the integrated 2007, 2012, and 2017 NLA
+lakes <- read_sf(dsn = dsn_loc, layer = "LakePolygons")
+
+# Load polygons of the lake catchments as defined by LakeCat. 
+catch <- read_sf(dsn = dsn_loc, layer = "LakeCatchments")
+
+# Load catchments with the lake area removed. These catchments have "holes" where the lake boundary is located.
+catch_no_lake <- read_sf(dsn = dsn_loc, layer = "LakeCatchments_WithoutLakes")
+
+# Load watersheds
+ws <- read_sf(dsn = dsn_loc, layer = "LakeWatersheds")
+
+# Load catchment polygons for example mountain lakes
+pet_lakes <- read_sf(dsn = paste0(dir, "ExampleMtnLakes.gpkg"), layer = "ExampleMtnLakePolygons") 
+
+# Load the raster of land classes that's projeted to albers equal area EPSG 5070
+land_class <- read_stars(paste0(dir, "LivingAtlasLandforms.tif"))
+
+# The output directory
+out_dir <- paste0(data_dir, "/data/nla_sample_mountain_catchment_no_lake/")
+
+```
+
+### Example Data Layers
+
+Color legend for Landforms data
+* Cream - One of: Flat Plains, Smooth Plains, Irregular Plains, Escarpments, Low Hills, Hills, Breaks/Foothills
+* Light Red - Low Mountains
+* Dark Red - High Mountains
+* Grey - Drainage Channels
+
+```{r, echo = F, message= FALSE, warning = F}
+library(mapview)
+
+# Select an example lake
+ex_lake       <- filter(lakes, UNIQUE_ID == "NLA_OR-10123")
+ex_catchment  <- filter(catch, UNIQUE_ID == "NLA_OR-10123")
+
+# Crop the landscape data
+land_crop <- st_crop(land_class, ex_catchment)
+
+# Create the map
+mapview(land_crop, col.regions = c(rep("bisque1", 7), "coral1", "red", "grey"), at = c(1:10), 
+        legend = FALSE, layer.name = "Landform") +
+  mapview(ex_catchment, layer.name = "Catchment") + 
+  mapview(ex_lake, layer.name = "Lake")
+
+```
+
+### Identify Mountain Lakes
+
+This function will generate a single .rds file that contains a dataframe with a single row for each lake at the specified output location. The information included the lake identifier, the total number of pixels within the specified area, the number of low mountain pixels, and the number of high mountain/deep canyon pixels.
+
+```{r}
+# Function to determine if lakes are in mountain landscapes. Set up to run with apply and in parallel.
+
+# lake_id       Unique identifier for the polygon to be run (usually a COMID or NARS UNIQUE_ID)
+# shape_df      Shapefile of the polygons to be processed
+# rast_data     Raster data used to determine surrounding landscape
+# out_dir       Location of function outputs
+# buffer        Should the function add a buffer to the polygon (TRUE/FALSE)?
+# buffer_dist   If buffer = TRUE, specify the extent of the buffer distance. Use units of the projection (usually meters)
+
+id_mountain_lake <- function(lake_id, shape_df, rast_data, out_dir, buffer = FALSE, buffer_dist = NA){
+  # Print the UNIQUE_ID
+  print(lake_id)
+  
+  # Get the polygon for this ID
+  lake_poly <- shape_df[which(shape_df$unique_id == lake_id),]
+  
+  # Ensure the polygon is in the same projection as the land class data
+  lake_proj <- st_transform(lake_poly, st_crs(rast_data))
+  
+  # If applying a buffer to a perimeter of the polygon
+  if(buffer == TRUE){
+    lake_proj <- st_buffer(lake_proj, dist = buffer_dist)
+  }
+  
+  # Crop the landscape data to the extent of the lake polygon
+  land_crop_buf <- st_crop(rast_data, lake_proj)
+  
+  # Read in data from stars proxy object
+  land_stars <- st_as_stars(land_crop_buf)
+  
+  # Create a table of the raster values in the cropped area
+  tab <- table(land_stars$LivingAtlasLandforms.tif)
+  
+  # Record the total number of pixels
+  tot_crop_pix <- sum(tab)
+  
+  # Record the number of mountain pixels, if present
+  low_mtn_pix <- ifelse("8" %in% dimnames(tab)[[1]], tab[match("8", dimnames(tab)[[1]])], 0)
+  
+  high_mtn_pix <- ifelse("9" %in% dimnames(tab)[[1]], tab[match("9", dimnames(tab)[[1]])], 0)
+  
+  # Save the results in a dataframe
+  result <- data.frame(unique_id = lake_id, low_mtn_pix, high_mtn_pix, tot_crop_pix)
+  
+  # Write the data to an rds file
+  saveRDS(result, file = paste0(out_dir,"lake_", lake_id, ".rds"))
+  return(result)
+}
+
+# # Testing
+# # Raster data
+# rast_data <- land_class
+# 
+# # The lake to process (UNIQUE_ID for NLA, COMID for LakeCat)
+# lake_id  <- 11922
+# 
+# # Shapefile of lake, catchmnet, or watersheds
+# shape_df <- pet_lakes
+# 
+# # If using a buffer
+# buffer <- FALSE
+# 
+# # Define the buffer distance (m)
+# buffer_dist <- NA
+# 
+# # The output directory
+# out_dir <- paste0(data_dir, "/data/nla_sample_mountain_catchment_no_lake/")
+# 
+# # Testing
+# id_mountain_lake("NLA_OR-10082", catch_no_lake, buffer = F)
+
+```
+
+
+### Run in Parallel 
+
+
+```{r, eval = F}
+library(parallel)
+
+# Define function inputs here
+lake_ids    <- catch_no_lake$UNIQUE_ID
+poly_input  <- catch_no_lake
+rast_input  <- land_class
+output_dir  <- paste0(data_dir, "/data/nla_sample_mountain_catchment_no_lake/")
+buffer      <- FALSE
+buffer_dist <- NA
+
+# Check the number of cores available
+detectCores()
+
+# Keep track of time
+start.time <- Sys.time()
+
+# Start up the clusters
+cl <- makeCluster(10) # Consider memory needs for each cluster
+  # Load need packages into each cluster
+  clusterEvalQ(cl, {
+    library(stars)
+    library(sf)
+    })
+  # Pass the needed data to each cluster
+  clusterExport(cl, "lake_ids")
+  clusterExport(cl, "poly_input")
+  clusterExport(cl, "rast_input")
+  clusterExport(cl, "output_dir")
+  clusterExport(cl, "buffer")
+  clusterExport(cl, "buffer_dist")
+  # Run the function
+  tmp <- parSapply(cl,                  # cluster object
+                   lake_ids,            # vector of lake IDs
+                   id_mountain_lake,    # function to run in parallel
+                   poly_input,          # shape data of extent to consider
+                   rast_input,          # raster data
+                   output_dir,          # output directory
+                   buffer, buffer_dist) # include and buffer (TRUE/FALSE) and, if TRUE, buffer extent
+  stopCluster(cl)
+
+# Check the time to run
+end.time <- Sys.time()
+end.time - start.time
+
+```
+
+### Run Sequentially 
+
+When the number of lakes to run is small or the spatial extent considered is large, it may make more sense to run the function sequentially rather than in parallel. For example, when running the identify function for very large lake watersheds, there can be issues where the nodes for the parallel process have insufficient memory. This can be resolved by running the code sequentially, thereby making the whole of computer memory available to run the process. 
+
+Generally, this process is used after the parallel process throws an error; therefore, a check is implemented to identify the lakes that have already been completed and run only the remaining lakes.
+
+```{r, eval = F}
+# Determine the COMIDs to run
+lake_ids <- pet_lakes$comid
+
+# Run in order of increasing basin size
+done_files   <- list.files(out_dir, pattern = ".rds", full.names = F)
+done_ids     <- sub(".rds.*", "", sub(".*_", "", done_files))
+done_ids     <- paste0('NLA_', done_ids)
+missing_coms <- catch_no_lake |>
+  filter(!UNIQUE_ID %in% done_ids) |>
+  drop_na(UNIQUE_ID) |>
+  pull(UNIQUE_ID)
+
+lake_ids <- missing_coms
+
+# Run function sequentially
+sapply(pet_lakes$comid, 
+       id_mountain_lake, 
+       shape_df = pet_lakes, 
+       rast_data, 
+       out_dir, 
+       buffer = FALSE, buffer_dist = NA)
+
+```
+
+
+### Exent Analysis
+
+The above process was run for multiple extents to test how the area considered would change the lakes that are considered mountain versus non-mountain lakes. The extents considered were lake boundaries with a 100 m, 500 m, or 1000 m buffer area added; the LakeCat catchment area; the LakeCat catchment area with the lake area removed; and the LakeCat watershed area.
+
+The following code reads in the individual .rds files that store the number of low and high mountain pixels for each lake and each extent and compiles into a single dataframe for export to a .csv.
+
+```{r, eval = F, echo = F,}
+# Get all file names
+dir_100m  <- paste0(data_dir, "/data/nla_sample_mountain_lakes_100m/")
+dir_500m  <- paste0(data_dir, "/data/nla_sample_mountain_lakes_500m/")
+dir_1000m <- paste0(data_dir, "/data/nla_sample_mountain_lakes_1000m/")
+dir_ws    <- paste0(data_dir, "/data/nla_sample_mountain_lakes_watershed/")
+dir_catch <- paste0(data_dir, "/data/nla_sample_mountain_lakes_catchment/")
+dir_catch_no_lake <- paste0(data_dir, "/data/nla_sample_mountain_catchment_no_lake/")
+
+dir_list <- list(dir_100m, dir_500m, dir_1000m, dir_ws, dir_catch, dir_catch_no_lake)
+buffers <- c("100m", "500m", "1000m", "ws", "catchment", "catch_no_lake")
+
+lapply(1:length(buffers), function(i){
+  print(paste("Processing buffer distance", buffers[i]))
+  
+  # Read file names
+  files <- list.files(dir_list[[i]], pattern = ".rds", full.names = T)
+  
+  # Create a master df with all data
+  mtn_lakes <- do.call(rbind, lapply(files, readRDS))
+  
+  # Write the data to csv for analysis
+  readr::write_csv(mtn_lakes, paste0(here(), "/inst/data/NLA_integrated_sample_mtnlakes_", buffers[i],"_buffer.csv"))  
+  
+})
+
+```
+
+For each extent, consider different thresholds for mountain area for designating a lake as either a mountain lake or a non-mountain lake. Considered the thresholds of 1%, 5%, 10%, and 25% mountain landform.
+
+```{r, message = F, echo = F}
+library(ggplot2)
+library(scales)
+
+# Read in data
+buffers <- c("100m", "500m", "1000m", "ws", "catchment", "catch_no_lake")
+
+mtn_lakes <- do.call(rbind, lapply(1:length(buffers), function(i){
+  df <- readr::read_csv(file = paste0(here(), "/inst/data/NLA_integrated_sample_mtnlakes_", buffers[i],"_buffer.csv"))
+  
+  mutate(df, buffer = buffers[i])
+}))
+
+mtn_lakes <- mtn_lakes |>
+  mutate(buffer = factor(buffer, levels = c("100m", "500m", "catch_no_lake", "catchment", "1000m", "ws")))
+
+# Try out some different thresholds for identifying mountain lakes
+mtn_lakes <- mtn_lakes |>
+  mutate(mtn_pix_sum = low_mtn_pix + high_mtn_pix,
+         perc_mtn_pix = mtn_pix_sum/tot_crop_pix,
+         MOUNTAIN_01PCT = ifelse(perc_mtn_pix >= 0.01, "MTN_LAKE", "NOT_MTN_LAKE"),
+         MOUNTAIN_05PCT = ifelse(perc_mtn_pix >= 0.05, "MTN_LAKE", "NOT_MTN_LAKE"),
+         MOUNTAIN_10PCT = ifelse(perc_mtn_pix >= 0.10, "MTN_LAKE", "NOT_MTN_LAKE"),
+         MOUNTAIN_25PCT = ifelse(perc_mtn_pix >= 0.25, "MTN_LAKE", "NOT_MTN_LAKE")) |>
+  # Assume that lakes without any catchment area are not mountain lakes. A safe assumption based on a visual assessment of the topographic maps near the lakes.
+  replace_na(list(MOUNTAIN_01PCT = "NOT_MTN_LAKE",
+                  MOUNTAIN_05PCT = "NOT_MTN_LAKE",
+                  MOUNTAIN_10PCT = "NOT_MTN_LAKE",
+                  MOUNTAIN_25PCT = "NOT_MTN_LAKE"))
+
+
+threshold_comp <- do.call(rbind, lapply(c(8:11), function(i){
+  mtn_lakes |>
+    count(mtn_lakes[,5], mtn_lakes[,i]) |>
+    rename(lake_type = 2) |>
+    filter(lake_type == "MTN_LAKE") |>
+    mutate(threshold = colnames(mtn_lakes[i]))
+}))
+
+threshold_comp$threshold <- factor(threshold_comp$threshold, 
+                                   levels = c(colnames(mtn_lakes)[8:11]))
+
+# Plot the number of mountain lakes identified by buffer size and threshold
+ggplot(threshold_comp, aes(x = buffer, y = n, fill = threshold)) +
+  geom_bar(stat = "identity", position = "dodge") +
+  xlab("Extent") +
+  ylab("Number of Mountain Lakes Identified") +
+  ggtitle("Effect of extent and threshold of low & high \nmountain pixels to be considered a mountain lake") +
+  scale_fill_discrete(name = "Threshold",
+                      labels = c('1%','5%','10%','25%'))
+
+# Does the number of mountain lakes change substantially when evaluating based on the catchment versus the catchment without the lake area?
+catch_without_lake <- mtn_lakes |>
+  filter(buffer == "catch_no_lake" | buffer == "catchment") |>
+  pivot_longer(MOUNTAIN_01PCT:MOUNTAIN_25PCT, names_to = "threshold", values_to = "desig") |>
+  group_by(buffer, threshold, desig) |>
+  summarise(count = n()) |>
+  pivot_wider(names_from = buffer, values_from = count)
+
+# Answer: Removing the lake area results in an additional 15-30 lakes receiving a mountain lake designation. 
+
+```
+
+`r knitr::kable(catch_without_lake)`
+
+### Data Export
+
+Create the final file with the subpopulation designation for each lake. This is used to calculate the indicators for each subpopulation. 
+
+```{r}
+# Final version for the catchments without lakes to compare the impact of the percent threshold on lake condition estimates
+mtn_lakes |>
+  filter(buffer == "catch_no_lake") |>
+  select(-(low_mtn_pix:perc_mtn_pix)) |>
+  rename(UNIQUE_ID = unique_id) |>
+  write_csv(paste0(here(), "/inst/data/NLA_mountain_lake_designation_catchment_without_lake.csv"))
+
+# Final version for the catchments without the lake area and threshold of 5% mountain area
+mtn <- readr::read_csv(file = paste0(here(), "/inst/data/NLA_integrated_sample_mtnlakes_catch_no_lake_buffer.csv"))
+  
+mtn |>
+  mutate(mtn_pix_sum = low_mtn_pix + high_mtn_pix,
+         perc_mtn_pix = mtn_pix_sum/tot_crop_pix,
+         perc_pix_05 = ifelse(perc_mtn_pix >= 0.05, "MTN_LAKE", "NOT_MTN_LAKE")) |>
+  select(-(low_mtn_pix:perc_mtn_pix)) |>
+  rename(UNIQUE_ID = unique_id,
+         MOUNTAIN_05PCT = perc_pix_05) |>
+  readr::write_csv(paste0(here(), "/inst/data/MountainLakes_Subpop05Pct.csv"))
+
+```

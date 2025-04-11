@@ -1,0 +1,1092 @@
+---
+title: "Ecological Condition of Mountain Lakes in the Conterminous United States and Vulnerability to Human Development"
+format: docx
+editor: visual
+editor_options: 
+  chunk_output_type: console
+fontsize: 11pt
+---
+
+## 3 Results
+
+```{r load packages, echo = FALSE, message = F, warning = F}
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+library(ggpubr)
+library(here)
+library(knitr)
+library(scales)
+library(sf)
+library(kableExtra)
+devtools::load_all()
+```
+
+### 3.1 Mountain Lakes in the Conterminous US
+
+```{r pet mtn lakes, echo = F, message = F}
+
+# Generate table
+pet_table <- kable(
+  select(pet, name, state, range, pct_mtn_area, citation),
+  col.names = c("Lake Name", "State", "Mountain Range", "Mountain Landform (%)", "Citation")
+  )
+
+# Lake with the lowest non-zero mountain area
+non_zero_min <- pet |>
+  filter(pct_mtn_area > 0) |>
+  pull(pct_mtn_area) |>
+  min()
+
+non_zero_name <- pull(filter(pet, pct_mtn_area == non_zero_min), name)
+
+```
+
+```{r threshold exploration, echo = F, message = F, warning = F}
+
+# Testing different thresholds
+th_test <- mtn |>
+  st_drop_geometry() |>
+  select(perc_mtn_pix) |>
+  mutate(MOUNTAIN_01PCT = ifelse(perc_mtn_pix >= 0.01, "MTN_LAKE", "NOT_MTN_LAKE"),
+         MOUNTAIN_05PCT = ifelse(perc_mtn_pix >= 0.05, "MTN_LAKE", "NOT_MTN_LAKE"),
+         MOUNTAIN_10PCT = ifelse(perc_mtn_pix >= 0.10, "MTN_LAKE", "NOT_MTN_LAKE"),
+         MOUNTAIN_25PCT = ifelse(perc_mtn_pix >= 0.25, "MTN_LAKE", "NOT_MTN_LAKE")) |>
+  pivot_longer(cols = MOUNTAIN_01PCT:MOUNTAIN_25PCT, names_to = "threshold", values_to = "desig") |>
+  summarise(count = n(), .by = c(threshold, desig)) |>
+  mutate(threshold = factor(threshold, levels = c("MOUNTAIN_01PCT", "MOUNTAIN_05PCT", "MOUNTAIN_10PCT", "MOUNTAIN_25PCT")),
+         desig = factor(desig, levels = c("NOT_MTN_LAKE", "MTN_LAKE")))
+
+# Condition estimates with 1, 5, 10, and 25% thresholds
+mtn_tab <- th_cond %>%
+  filter(Category == "Total") %>%
+  select(Type, Subpopulation, Estimate.U, LCB95Pct.U, UCB95Pct.U) %>%
+  distinct() %>%
+  filter(Type != "NATIONAL") |>
+  left_join(th_test, by = c("Type" = "threshold", "Subpopulation" = "desig")) |>
+  mutate(across(ends_with(".U"), round, 0)) |>
+  mutate(Estimate_95CI = paste0(comma(Estimate.U), " (", comma(LCB95Pct.U), "-", comma(UCB95Pct.U), ")")) |>
+  select(Type, Subpopulation, Estimate_95CI, count) |>
+  pivot_wider(id_cols = Type, 
+              names_from = Subpopulation,
+              values_from = c(Estimate_95CI, count)) |>
+  mutate(Type = c("1%", "5%", "10%", "25%")) |>
+  relocate(Type, count_MTN_LAKE, Estimate_95CI_MTN_LAKE, count_NOT_MTN_LAKE, Estimate_95CI_NOT_MTN_LAKE)
+
+th_table <- kable(mtn_tab, 
+                  col.names = c("Threshold", 
+                                "NLA Sampled Mountain Lakes", 
+                                "Estimated Mountain Lake Population (95% CI)", 
+                                "NLA Sampled Non-Mountain Lakes", 
+                                "Estimated Non-Mountain Lake Population (95% CI)"), 
+                  align = "rrrrr",
+                  format = "pipe")
+
+# Some stats for the text
+
+# NLA lake count and percent with and without mountain area
+mtn_count <- nrow(filter(mtn, perc_mtn_pix > 0))
+mtn_pct   <- round(mtn_count/nrow(mtn) * 100, 1)
+non_count <- nrow(filter(mtn, perc_mtn_pix == 0))
+non_pct   <- round(non_count/nrow(mtn) * 100, 1)
+
+mtn_med  <- round(median(pull(filter(mtn, perc_mtn_pix > 0), perc_mtn_pix)) * 100, 1)
+mtn_mean <- round(mean(pull(filter(mtn, perc_mtn_pix > 0), perc_mtn_pix)) * 100, 1)
+mtn_max  <- round(max(mtn$perc_mtn_pix) * 100, 1)
+
+# Thresholds
+th01 <- pull(filter(mtn_tab, Type == "1%"), count_MTN_LAKE)
+th05 <- pull(filter(mtn_tab, Type == "5%"), count_MTN_LAKE)
+th25 <- pull(filter(mtn_tab, Type == "25%"), count_MTN_LAKE)
+
+th05_mtn <- pull(filter(mtn_tab, Type == "5%"), Estimate_95CI_MTN_LAKE)
+th05_non <- pull(filter(mtn_tab, Type == "5%"), Estimate_95CI_NOT_MTN_LAKE)
+
+```
+
+In the NLA, `r non_count` sampled lakes (`r non_pct`%) had no mountainous terrain within their lake catchment. Among the `r mtn_count` lakes (`r mtn_pct`%) that did have some mountainous terrain, the percent area ranged from \<0.01% to 100% (median = `r mtn_med`%). Based on the four thresholds for mountainous terrain, the number of NLA lakes identified as mountain lakes ranged from `r th01` lakes for the 1% mountain area threshold to `r th25` lakes with 25% mountain area threshold (@tbl-thresholds). Extrapolating to the CONUS population, the estimated mountain lake population size ranged from `r pull(filter(mtn_tab, Type == "1%"), Estimate_95CI_MTN_LAKE)` lakes for the 1% mountain area to `r pull(filter(mtn_tab, Type == "25%"), Estimate_95CI_MTN_LAKE)` lakes for the 25% threshold. Notably, the different thresholds had a much lower impact on the size of estimated non-mountain lake population. The estimated non-mountain lake population size ranged from `r pull(filter(mtn_tab, Type == "1%"), Estimate_95CI_NOT_MTN_LAKE)` lakes for the 1% mountain area to `r pull(filter(mtn_tab, Type == "25%"), Estimate_95CI_NOT_MTN_LAKE)` lakes for the 25% threshold. In other words, the population size difference for 1% versus a 25% threshold results in a 29% decrease in the number of mountain lakes versus a 2% increase in the number of non-mountain lakes. In addition, the mountain area threshold had only a marginal impact on the estimated condition of mountain and non-mountain lake populations (Figure S2).
+
+```{r pet lakes table, echo = F}
+#| label: tbl-thresholds
+#| tbl-cap: The number of NLA sampled lakes and the estimated population size of mountain or non-mountain lakes based on different threholds of mountain area within the lake catchment. Estimated populations refer to lakes of >1 ha and 1 meter deep in the conterminous US.
+th_table
+```
+
+To help inform a threshold of mountain terrain that would capture many mountain lakes across the CONUS, we reviewed `r nrow(pet)` lakes from previous studies that are identified as "mountain lakes" from the literature (@tbl-petlakes). These included 14 lakes in western states and 5 lakes in eastern states. The proportion of mountain area in the catchments of these example lakes ranged from `r min(pet$pct_mtn_area)` to `r max(pet$pct_mtn_area)`% (median = `r median(pet$pct_mtn_area)`%, mean = `r round(mean(pet$pct_mtn_area), 0)`%). Only one of the 19 studied lakes (Upper Lake Mary in Arizona) was excluded for containing no mountain terrain in the catchment. `r non_zero_name` was the lake with the lowest percent mountain area that was greater than zero (`r non_zero_min`% mountain area). To be inclusive of these commonly studied and cited mountain lakes across the western and eastern portions of the CONUS and to expand on analyses that have historically only included alpine lakes, we selected a mountain area threshold of 5% for this study.
+
+```{r pet lakes table, echo = F}
+#| label: tbl-petlakes
+#| tbl-cap: Mountain lakes identified in the literature and the percent mountain area within the lake catchment.
+pet_table
+```
+
+```{r mtn lake condition, echo = FALSE, message = F}
+cond_tab <- cond |>
+  filter(Category == "Total") |>
+  filter(Type %in% c("MOUNTAIN_05PCT", "NATIONAL")) |>
+  select(-Indicator) |>
+  distinct() |>
+  mutate(across(ends_with(".U"), \(x) round(x, 0)))
+ 
+# Stats for reporting
+pull_num <- function(col.name, subpop){
+  col.num <- match(col.name, colnames(cond_tab))
+  num <- pull(filter(cond_tab, Subpopulation == subpop), col.num)
+}
+
+# Sampled lakes
+samp_tot <- pull_num("nResp", "NATIONAL")
+samp_mtn <- pull_num("nResp", "MTN_LAKE")
+samp_nmt <- pull_num("nResp", "NOT_MTN_LAKE")
+
+# Population estimates
+pop_tot <- pull_num("Estimate.U", "NATIONAL")
+pop_mtn <- pull_num("Estimate.U", "MTN_LAKE")
+pop_nmt <- pull_num("Estimate.U", "NOT_MTN_LAKE")
+
+# 95% confidence intervals for population estimates
+mtn_l95 <- comma(pull_num("LCB95Pct.U", "MTN_LAKE"))
+mtn_h95 <- comma(pull_num("UCB95Pct.U", "MTN_LAKE"))
+nmt_l95 <- comma(pull_num("LCB95Pct.U", "NOT_MTN_LAKE"))
+nmt_h95 <- comma(pull_num("UCB95Pct.U", "NOT_MTN_LAKE"))
+
+
+
+```
+
+```{r mtn lake characteristics, echo = F, message = F, warning = F, include = F}
+
+# How much of the catchments of mountain lakes was mountain landform?
+pct_mtn  <- pull(filter(mtn, desig == "MTN_LAKE"), perc_mtn_pix)
+mtn_min  <- round(min(pct_mtn) * 100, 0)
+mtn_max  <- round(max(pct_mtn) * 100, 0)
+mtn_mean <- round(mean(pct_mtn) * 100, 0)
+mtn_med  <- round(median(pct_mtn) * 100, 0)
+
+# Assign east/west designations to lakes that are east/west of the Mississippi River
+west_states <- "_WA|_OR|_CA|_ID|_NV|_AZ|_UT|_WY|_MT|_CO|_NM|_TX|_OK|_KS|_NE|_SD|_ND|_IA|_AR|_LA"
+
+mtn <- mtn |>
+  mutate(region = factor(case_when(grepl(west_states, UNIQUE_ID) ~ "west", TRUE ~ "east"), levels = c("west", "east"))) |>
+  mutate(PctAgWs = PctHay2011Ws + PctCrop2011Ws,
+         PctFstWs = PctDecid2011Ws + PctConif2011Ws + PctMxFst2011Ws)
+
+# How many mtn lakes are east/west of Miss
+west_of_miss <- nrow(filter(mtn, desig == "MTN_LAKE" & region == "west"))
+east_of_miss <- nrow(mtn) - west_of_miss
+
+# What was the range of lake elevations?
+mtn_elv <- pull(filter(mtn, desig == "MTN_LAKE"), ELEVATION)
+min_elv <- min(mtn_elv)
+max_elv <- max(mtn_elv)
+med_elv <- round(median(mtn_elv), 0)
+nmt_elv <- pull(filter(mtn, desig == "NOT_MTN_LAKE"), ELEVATION)
+min_nelv <- min(nmt_elv)
+max_nelv <- max(nmt_elv)
+med_nelv <- median(nmt_elv)
+
+# How many mountain lakes are natural versus man-made
+# Function to calculate percents
+flake_orgn <- function(designator, lake_orgn){
+  num <- nrow(filter(mtn, desig == designator & LAKE_ORGN == lake_orgn))
+  samp_total <- ifelse(designator == "MTN_LAKE", samp_mtn, samp_nmt)
+  perc <- round(num/samp_total * 100, 1)
+  return(perc)
+}
+nat_mtn <- flake_orgn("MTN_LAKE", "NATURAL")
+man_mtn <- flake_orgn("MTN_LAKE", "MAN_MADE")
+
+nat_non <- flake_orgn("NOT_MTN_LAKE", "NATURAL")
+man_non <- flake_orgn("NOT_MTN_LAKE", "MAN_MADE")
+
+nrow(filter(mtn, desig == "MTN_LAKE" & LAKE_ORGN == "MAN_MADE" & region == "east"))
+nrow(filter(mtn, desig == "MTN_LAKE" & LAKE_ORGN == "MAN_MADE" & region == "west"))
+
+# What's the typical distance (in meters) between the lake boundary and the catchment boundary?
+summary(mtn$lake_cat_dist)
+quantile(mtn$lake_cat_dist, 0.025)
+quantile(mtn$lake_cat_dist, 0.975)
+
+# Boxplots of mountain lake characterstics for eastern and western mountain lakes
+
+# Set 1: Characteristics with different units and scales
+var <- c("ELEVATION",
+         "pct_mtn",
+         "mean_slope",
+         "PctFstWs", 
+         "MAXDEPTH", 
+         "PctIce2011Ws",
+         "LakeAreaSqKm", 
+         "PctAgWs",
+         "CatchAreaSqKm", 
+         "PctDevWs")
+
+labs <- c("Lake Elevation (m)",
+          "Mountain Landform (%)", 
+          "Mean Slope (deg)", 
+          "Forest (%)",
+          "Lake Maximum Depth (m)",
+          "Ice (%)", 
+          "Lake Area (SqKm)",  
+          "Agriculture (%)",
+          "Watershed Area (SqKm)", 
+          "Developed (%)")
+
+boxplots <- lapply(1:length(var), function(i){
+  
+  vis_vars <- mtn |>
+    filter(desig == "MTN_LAKE") |>
+    mutate(pct_mtn = perc_mtn_pix * 100)
+  
+  col_num <- match(var[i], colnames(vis_vars))
+  
+  p <- ggplot(vis_vars) +
+    geom_boxplot(aes(y = pull(vis_vars, col_num), x = region), coef = NULL, width = 0.3, fatten = NULL, fill = "grey") +
+    xlab("") +
+    ylab(labs[i]) +
+    scale_x_discrete(breaks = levels(mtn$region),
+                     labels = c("West", "East")) +
+    coord_flip() +
+    stat_summary(aes(y = pull(vis_vars, col_num), x = region), fun = "median", geom = "point", shape = 19, size = 2, fill = "#333333") +
+    theme_bw()
+  
+  if(var[i] == "CatchAreaSqKm" | var[i] == "LakeAreaSqKm"){
+    p <- p + scale_y_continuous(trans='log10',
+                                breaks=trans_breaks('log10', function(x) 10^x),
+                                labels=trans_format('log10', math_format(10^.x)),
+                                limits = c(0.01, 1000))
+  }
+  
+  if(var[i] %in% c("pct_mtn", "PctDevWs", "PctAgWs", "PctFstWs", "PctIce2011Ws")){
+    p <- p + ylim(0, 100)
+  }
+  return(p)
+})
+
+boxplot_grid <- ggpubr::ggarrange(plotlist = boxplots, ncol = 2, nrow = 5, labels = c("a", "f", "b", "g", "c", "h", "d", "i", "e", "j"))
+
+# The percent of western mountain lakes that have perennial snow/ice cover in their watersheds
+pct_wst_ice <- round(nrow(filter(mtn, desig == "MTN_LAKE" & region == "west" & PctIce2011Ws > 0)) / nrow(filter(mtn, desig == "MTN_LAKE" & region == "west")) * 100, 1)
+
+```
+
+```{r make map of lakes, echo = F, warning = F, message = F}
+# Load state boundaries
+conus <- tigris::states(cb = TRUE, progress_bar = FALSE)  %>%
+  filter(!STUSPS %in% c('HI', 'PR', 'AK', 'MP', 'GU', 'AS', 'VI'))  %>%
+  st_transform(crs = 5070)
+
+mtn_lake_map <- ggplot() + 
+  geom_sf(data = conus, fill = "#e2e2e2", color = "white", size = 0.5) +
+  geom_sf(data = mtn, shape = 21, aes(fill = desig), size = 1.5, stroke = .2) +
+  scale_fill_manual(breaks = levels(mtn$desig),
+                    name = "Lake Type",
+                    values =  c("#009AA3", "#ED7D31"),
+                    labels = c("Mountain", "Non-Mountain")) +
+  theme_void() +
+  theme(legend.position = "bottom")
+```
+
+Based on the 5% area threshold for mountain area within the lake catchment, `r samp_mtn` (`r round(samp_mtn/samp_tot * 100, 0)`%) of the `r comma(samp_tot)` lakes sampled in the 2007, 2012, and 2017 NLA are classified as mountain lakes (@fig-lakemap). Mountain lake catchments had a median of `r mtn_med`% mountain area. Based on the 5% threshold for mountainouis terrain in the lake catchment, there are an estimated `r th05_mtn` mountain lakes in the CONUS that are at least 1 ha in surface and 1 m deep compared with `r th05_non` non-mountain lakes. As a proportion, mountain lakes account for an estimated `r round(pop_mtn/pop_tot * 100, 1)`% of lakes in CONUS.
+
+```{r mtn lake map, echo = F, warning = F, message = F, fig.width = 4.5, fig.height = 4}
+#| label: fig-lakemap
+#| fig-cap: "Lakes sampled in the 2007, 2012, and 2017 National Lakes Assessment. Mountain lakes are identified as having ≥5% mountain landform within their catchment. For easier viewing, mountain lakes (in blue) are shown on top of the more abundant non-mountain lakes (in orange)."
+mtn_lake_map
+```
+
+```{r catchment characteristics, echo = F, message = F, warning = F}
+# Make some bar plots
+mtn_dev_wide <- mtn |>
+  st_drop_geometry() |>
+  select(UNIQUE_ID, desig, PctUrbOp2011Cat, PctUrbOp2011Ws, POPDEN2010Cat:HydrlCondWs, PctDevCat, PctDevWs) |>
+  mutate(diff_cat_ws = ifelse(is.finite(PctDevCat - PctDevWs), PctDevCat - PctDevWs, NA),
+         prop_cat_ws = ifelse(is.finite(PctDevCat/PctDevWs), PctDevCat/PctDevWs, NA),
+         prop_devop_cat_ws = ifelse(is.finite(PctUrbOp2011Cat/PctUrbOp2011Ws), PctUrbOp2011Cat/PctUrbOp2011Ws, NA),
+         prop_pop_cat_ws = ifelse(is.finite(POPDEN2010Cat/POPDEN2010Ws), POPDEN2010Cat/POPDEN2010Ws, NA),
+         prop_hud_cat_ws = ifelse(is.finite(HUDEN2010Cat/HUDEN2010Ws), HUDEN2010Cat/HUDEN2010Ws, NA))
+
+mtn_dev_long <- tidyr::pivot_longer(mtn_dev_wide, PctUrbOp2011Cat:prop_hud_cat_ws, names_to = "type", values_to = "value")
+
+# Calculate the means
+dev_means <- mtn_dev_long |>
+  group_by(desig, type) |>
+  summarise(mean = mean(na.omit(value)),
+            MOE = qt(0.975, df = n() - 1) * sd(na.omit(value)) / sqrt(n()))
+  
+# Side-by-side of mean developed area in the catchment versus the watershed for mountain and non-mountain lakes
+# Variable is the root variable name (e.g., "POPDEN2010")
+# subpop is the subpopulation being run for the analysis ("mtn_lake", "nonmtn_lake")
+# y_label is the label for the y_axis
+mtn_plot <- function(var, subpop, y_label, tag, ylimit){
+  
+  xlabel <- ifelse(subpop == "MTN_LAKE", "Mountain", "Non-Mountain")
+  col.type <- ifelse(subpop == "MTN_LAKE", "#009AA3", "#ED7D31")
+  
+  ggplot(data = filter(dev_means, type %in% c(paste0(var, "Cat"), paste0(var, "Ws")) & desig == subpop)) +
+    geom_bar(stat = "identity", position = "dodge", 
+                     aes(x = type, y = mean), fill = col.type) +
+    geom_errorbar(aes(x = type, ymin = mean - MOE, ymax = mean + MOE), width=.2,
+                  position=position_dodge(.9)) +
+    ylab(y_label) +
+    xlab(xlabel) +
+    labs(tag = tag) +
+    ylim(0, ylimit) +
+    scale_x_discrete(labels = c("Catchment", "Watershed")) +
+    theme_light() +
+    theme(legend.position = "none",
+          panel.background = element_rect(fill='transparent'),
+          plot.background = element_rect(fill='transparent', color = NA),
+          legend.background = element_rect(fill='transparent', color = NA),
+          legend.box.background = element_rect(fill='transparent', color = NA))
+}
+
+# For development in the catchment and watershed
+ylim <- 8
+dev_plot_mtn <- mtn_plot(var = "PctDev", subpop = "MTN_LAKE", tag = "a", y_label = "Developed Area (%)", ylimit = ylim)
+dev_plot_nonmtn <- mtn_plot(var = "PctDev", subpop = "NOT_MTN_LAKE", tag = "b", y_label = "Developed Area (%)", ylimit = ylim)
+
+# Function to generate a plot comparing some characteristic between mountain and non-mountain lakes
+mtn_nonmtn_plot <- function(df, variable, y_label, tag, file_name){
+  
+  p1 <- ggplot(data = filter(df, type == variable), 
+         aes(x = desig, y = mean, fill = desig)) +
+    geom_bar(stat = "identity", position = "dodge") +
+    geom_errorbar(aes(ymin = mean - MOE, ymax = mean + MOE), width=.2,
+                  position=position_dodge(.9)) +
+    ylab(y_label) +
+    xlab("Lake Type") +
+    labs(tag = tag) +
+    scale_fill_manual(breaks = c("MTN_LAKE", "NOT_MTN_LAKE"),
+                      values = c("#009AA3", "#ED7D31"),
+                      labels = c("Mountain", "Non-Mountain"),
+                      name = " ") +
+    scale_x_discrete(labels = c("Mountain", "Non-Mountain")) +
+    theme_light() +
+    theme(legend.position = "none",
+          panel.background = element_rect(fill='transparent'),        
+          plot.background = element_rect(fill='transparent', color = NA), 
+          legend.background = element_rect(fill='transparent', color = NA), 
+          legend.box.background = element_rect(fill='transparent', color = NA))
+  
+  return(p1)
+}
+
+dev_prop_chg <- mtn_nonmtn_plot(df = dev_means, variable = "prop_cat_ws", tag = "c",
+                y_label = "Catchment/Watershed Dev Area")
+
+# Plot for the low, medium, and high intensity development 
+dev_plot <- ggarrange(plotlist = list(dev_plot_mtn, (dev_plot_nonmtn + rremove("ylab") + theme(axis.text.y = element_blank())), dev_prop_chg), nrow = 1, ncol = 3)
+
+# Catchment characteristics for mountain and non-mountan lakes
+hydrcond <- mtn_nonmtn_plot(df = dev_means, variable = "HydrlCondCat", 
+                y_label = "Hydraulic Conductivity (um/s)", tag = "a")
+
+runoff <- mtn_nonmtn_plot(df = dev_means, variable = "RunoffCat", 
+                y_label = "Runoff (mm)",  tag = "b")
+
+bedrock <- mtn_nonmtn_plot(df = dev_means, variable = "RckdepCat", 
+                y_label = "Depth to Bedrock (m)",  tag = "c")
+
+# Plot for some of the catchment characteristics 
+cat_char_plot <- ggarrange(plotlist = list(hydrcond, runoff, bedrock), nrow = 1, ncol = 3)
+
+# Function to print the mean value of the land cover type based on subpopulation
+r <- function(subpop, var){
+  # M for mountain lake and N for non-mountain lakes
+  subpop <- ifelse(subpop == "M", "MTN_LAKE", "NOT_MTN_LAKE") 
+  # Filter to the numbers of interest
+  dat <- filter(dev_means, desig == subpop & type == var)
+  est <- round(pull(dat, mean), 1)
+  moe  <- round(pull(dat, MOE), 1)
+  paste(est, "±", moe)
+}
+
+# How many of the mountain and non-mountain lakes are on public land?
+# What is the proportion of mountain and non-mountain lake catchments that are at least partially on protected land
+fpadus <- function(subpop, padus_type, pres = TRUE){
+  # M for mountain lake and N for non-mountain lakes
+  subpop <- ifelse(subpop == "M", "MTN_LAKE", "NOT_MTN_LAKE")
+  # PADUS variables included are national forest land (nf) or wilderness areas (wa)
+  padus_type <- ifelse(padus_type == "nf", "pct_nat_forest", "pct_wilderness")
+  # Retrieve the proportion of lakes that fall into the category
+  dat <- pull(filter(mtn, desig == subpop), match(padus_type, colnames(mtn)))
+  # Proportion of lakes with(out) protection area land class
+  if(pres){
+    round(length(dat[dat > 0]) / length(dat) * 100, 0)
+  } else {round(length(dat[dat == 0]) / length(dat) * 100, 0)}
+}
+
+# What is the count of building footprints in mountain lake catchments versus non-mountain lakes?
+bldg_mtn  <- pull(filter(mtn, desig == "MTN_LAKE"), BuildingCount) 
+bldg_nmtn <- pull(filter(mtn, desig == "NOT_MTN_LAKE"), BuildingCount) 
+
+pct_zero_bldg_mtn  <- round(length(bldg_mtn[bldg_mtn == 0]) / length(bldg_mtn) * 100, 0)
+pct_zero_bldg_nmtn <- round(length(bldg_nmtn[bldg_nmtn == 0]) / length(bldg_nmtn) * 100, 0)
+
+pct_with_bldg_mtn  <- round(length(bldg_mtn[bldg_mtn > 0]) / length(bldg_mtn) * 100, 0)
+pct_with_bldg_nmtn <- round(length(bldg_nmtn[bldg_nmtn > 0]) / length(bldg_nmtn) * 100, 0)
+
+med_bldg_mtn  <- median(bldg_mtn[bldg_mtn > 0])
+med_bldg_nmtn <- round(median(bldg_nmtn[bldg_nmtn > 0], na.rm = TRUE), 0)
+
+```
+
+Most mountain lakes were west of the Mississippi River (n = `r west_of_miss`) with only `r east_of_miss` lakes east of the river. Sampled western mountain lakes tend to occur at higher elevations, have steeper mean slopes, and have a higher proportion of their catchment that was mountain landform than lakes in the east (@fig-boxplot). Western and eastern mountain lakes were comparable in terms of maximum lake depth, lake area, and watershed area with western mountain lakes having a slightly higher maximum range. Western mountain lakes had lower forest cover compared to eastern mountain lakes. None of the sampled eastern mountain lake watersheds contained perennial snow or ice cover compared to `r pct_wst_ice`% of western mountain lakes. Approximately half of sampled mountain lakes are naturally occurring `r round(nat_mtn/samp_mtn * 100, 0)`% versus artificially constructed (`r round(man_mtn/samp_mtn * 100, 0)`%). Slightly fewer non-mountain lakes were natually occurring (`r round(nat_non/samp_mtn * 100, 0)`%) versus artificially constructed (`r round(man_non/samp_mtn * 100, 0)`%). Mountain lakes often lie in federally protected areas, with `r fpadus("M", "nf")`% of mountain lake catchments on National Forest land and `r fpadus("M", "wa")`% in National Wilderness Areas. In contrast, just `r fpadus("N", "nf")`% and `r fpadus("N", "wa")`% of non-mountain lake catchments occur in National Forest and Wilderness Areas, respectively. Both western and eastern mountain lakes were low in agricultural and developed land cover; however, the patterns in development differed for mountain lakes compared to non-mountain lakes, as described below.
+
+```{r boxplots of eastern and western mtn lake characteristics, echo = F, warning = F, message = F, fig.width = 6.5, fig.height = 7.5}
+#| label: fig-boxplot
+#| fig-cap: "Boxplots mountain lake characteristics in the eastern and western United States. The lake elevation (a), catchment mean slope (b), lake maximum depth(c), lake surface area (d), watershed area (e), as well as percent mountain landform in the catchment (f) and amount of forest (g), ice (h),  agriculture (i), and developed (j) land cover in the lake watersheds. Boxes represent the 25th and 75th percentiles, whiskers show the full data range, and circles indicate the data mean."
+boxplot_grid
+```
+
+While mountain lakes of the CONUS are in less developed regions, development is still present around some lakes. In addition, mountain lakes have characteristics that may increase their vulnerability to impacts from development. Based on the building footprints, `r pct_zero_bldg_mtn`% of mountain lake catchments contained buildings compared to `r pct_zero_bldg_nmtn`% of non-mountain lakes. In addition, among mountain lakes that did have buildings in the catchment, the median number of buildings was `r med_bldg_mtn` and approximately half the median of `r med_bldg_nmtn` for non-mountain lakes. Mountain lakes also had lower mean percent developed land cover within their catchments and watersheds (@fig-dev). Developed land cover within the catchment area is slightly higher for both mountain and non-mountain lake catchments compared to the watershed. When evaluating the ratio of catchment to watershed percent area developed, mountain lakes had a higher mean ratio (`r r("M","prop_cat_ws")`) compared to non-mountain lakes (`r r("N","prop_cat_ws")`). Finally, mountain lakes differ in several characteristics that may contribute to how development can impact these systems. Mountain lake catchments have lower soil hydraulic conductivity, higher annual runoff, and shallower depths to bedrock compared to non-mountain lakes (@fig-char).
+
+```{r deveopment figure, echo = F, message = F, warning = F}
+#| label: fig-dev
+#| fig-cap: The mean ± 95% confidence interval of percent land cover by the sum of low, medium, and high intesity development in mountain (a) and non-mountain (b) lake catchment and watershed areas. The mean ratio of the catchment to watershed area covered by low, medium, and high intensity development for mountain and non-mountain lakes (c).
+#| fig-height: 3
+#| fig-width: 7
+dev_plot
+```
+
+```{r characteristics figure, echo = F, message = F, warning = F}
+#| label: fig-char
+#| fig-cap: The mean ± 95% confidence interval of the soil hydraulic conductivity (a), annual runoff (b), and depth to bedrock (c) for mountain and non-mountain lake catchments. 
+#| fig-height: 3
+#| fig-width: 7
+cat_char_plot
+```
+
+### 3.2 Condition of Mountain Lakes
+
+```{r text condition estimates, echo = F, output = F}
+# To review the numbers
+cond_tab <- cond |>
+  filter(Category != "Total",
+         Type == "MOUNTAIN_05PCT", # "NATIONAL" for comparison against all lakes in the NLA
+         !Indicator %in% c("CYNX_REC", 'WHO_MICX_COND', "MICX_EPA_COND")) |>
+  mutate(Estimate.P = round(Estimate.P, 1),
+         LCB95Pct.P = round(LCB95Pct.P, 1),
+         UCB95Pct.P = round(UCB95Pct.P, 1),
+         Category = case_when(Category == "High (>=5 ppm)" ~ "Good",
+                              Category == "Moderate (>3 - <5 ppm)" ~ "Fair",
+                              Category == "Low (<=3 ppm)" ~ "Poor",
+                              TRUE ~ Category))
+
+# Look at all categories
+cond_tab |>
+  pivot_wider(id_cols = c(Subpopulation, Indicator), names_from = Category, values_from = Estimate.P) |>
+  relocate(Indicator, Subpopulation, Good, Fair, Poor, 'Not Assessed')
+
+# For which indicators are more mountain lakes in good condition?
+cond_tab |>
+  pivot_wider(id_cols = c(Category, Indicator), names_from = Subpopulation, values_from = Estimate.P) |>
+  filter(Category == "Good") |>
+  mutate(MTNS_Better = ifelse(MTN_LAKE > NOT_MTN_LAKE, "Better", "Not_Better")) |>
+  arrange(MTN_LAKE)
+
+# For which indicators are more mountain lakes in good condition?
+cond_tab |>
+  pivot_wider(id_cols = c(Category, Indicator), names_from = Subpopulation, values_from = Estimate.P) |>
+  filter(Category == "Poor") |>
+  mutate(MTNS_Better = ifelse(MTN_LAKE < NOT_MTN_LAKE, "Better", "Not_Better")) |>
+  arrange(MTN_LAKE)
+
+# Compare trophic states
+cond_tab |>
+  filter(Indicator == "TROPHIC_STATE") |>
+  pivot_wider(id_cols = Subpopulation, names_from = Category, values_from = Estimate.P) |>
+  relocate(Subpopulation, Oligotrophic, Mesotrophic, Eutrophic, Hypereutrophic, 'Not Assessed')
+
+# Function to print the percents in each condition category based on indicator and subpopulation
+f <- function(subpop, ind, cat){
+  subpop <- ifelse(subpop == "M", "MTN_LAKE", "NOT_MTN_LAKE") # M for mountain lake and N for non-mountain lakes
+  cat <- ifelse(cat == "G", "Good", 
+                ifelse(cat == "F", "Fair", 
+                       ifelse(cat == "P", "Poor", 
+                              ifelse(cat == "O", "Oligotrophic", 
+                                     ifelse(cat == "M", "Mesotrophic", 
+                                            ifelse(cat == "E", "Eutrophic", 
+                                                   ifelse(cat == "H", "Hypereutrophic", 
+                                                          ifelse(cat == "D", "Detected", 
+                                                                 ifelse(cat == "N", "Not Detected", "Not Assessed")))))))))
+  est <- pull(filter(cond_tab, Subpopulation == subpop & Category == cat & Indicator == ind), Estimate.P)
+  return(est)
+}
+
+# Range of percent of mountain lakes in "good" condition?
+
+# Lowest is proportion in good condition lakeshore disturbance
+mtn_lsd <- pull(filter(cond_tab, Subpopulation == "MTN_LAKE" & Category == "Good" & Indicator == "RDIS_COND"), Estimate.P)
+non_lsd <- pull(filter(cond_tab, Subpopulation == "NOT_MTN_LAKE" & Category == "Good" & Indicator == "RDIS_COND"), Estimate.P)
+
+# Highest is dissolved oxygen for mtn lakes
+mtn_do  <- pull(filter(cond_tab, Subpopulation == "MTN_LAKE" & Category == "Good" & Indicator == "DIS_O2_CLS"), Estimate.P)
+
+# High is ANC for non-mtn lakes
+non_do  <- pull(filter(cond_tab, Subpopulation == "NOT_MTN_LAKE" & Category == "Good" & Indicator == "DIS_O2_CLS"), Estimate.P)
+
+# ANC
+mtn_anc  <- pull(filter(cond_tab, Subpopulation == "MTN_LAKE" & Category == "Good" & Indicator == "ACID_COND"), Estimate.P)
+non_anc  <- pull(filter(cond_tab, Subpopulation == "NOT_MTN_LAKE" & Category == "Good" & Indicator == "ACID_COND"), Estimate.P)
+
+# Poor condition
+
+# For mountain lakes
+mtn_anc_p  <- pull(filter(cond_tab, Subpopulation == "MTN_LAKE" & Category == "Poor" & Indicator == "ACID_COND"), Estimate.P)
+mtn_chl_p  <- pull(filter(cond_tab, Subpopulation == "MTN_LAKE" & Category == "Poor" & Indicator == "CHLA_COND"), Estimate.P)
+
+# And non-mountain lakes
+non_anc_p  <- pull(filter(cond_tab, Subpopulation == "NOT_MTN_LAKE" & Category == "Poor" & Indicator == "ACID_COND"), Estimate.P)
+non_tp_p   <- pull(filter(cond_tab, Subpopulation == "NOT_MTN_LAKE" & Category == "Poor" & Indicator == "PTL_COND"), Estimate.P)
+
+```
+
+For 11 of 12 indicators, mountain lakes are in better condition compared to both non-mountain lakes (@fig-condition) and the population of lakes in the CONUS as a whole (Figure S3). Since the population of all lakes includes mountain lakes, we present the results in terms of mountain lakes versus non-mountain lakes for ease of presentation and interpretation. A higher proportion of mountain lakes are in the good condition (range: `r mtn_lsd`% to `r mtn_do`%) compared to non-mountain lakes (range: `r non_lsd`% to `r non_do`%) for 11 indicators. The one exception was acid neutralizing capacity, with `r mtn_anc`% of mountain lakes in good condition compared to `r non_anc`% of non-mountain lakes. For all indicators, a smaller proportion of mountain lakes are in poor condition (`r mtn_anc_p`% to `r mtn_chl_p`%) compared to non-mountain lakes (`r non_anc_p`% to `r non_tp_p`%).
+
+Among biological indicators, the trophic status of nearly half of mountain lakes is oligotrophic compared to under 10% of non-mountain lakes (@fig-condition). In contrast, eutrophic or hypereutrophic mountain lakes were less common than among non-mountain lakes. Chlorophyll a and benthic macroinvertebrates are in good condition for over half of mountain lakes, respectively, versus less than half of non-mountain lakes.
+
+Among the physical habitat indicators, a high percent of mountain lakes were in good condition for littoral cover and lake habitat complexity compared to non-mountain lakes (Figure 6). Riparian vegetation and lakeshore disturbance were the two indicators with the lowest proportion of mountain lakes in good condition; however, this is still higher than the proportion for non-mountain lakes.
+
+Among the chemical indicators, dissolved oxygen is in good condition for over `r round(f("M","DIS_O2_CLS","G"), -1)`% of mountain lakes compared to just over 75% for non-mountain lakes (@fig-condition). Acid neutralizing capacity is the single indicator for which mountain lakes had a lower proportion in good condition compared to non-mountain lakes. For total nitrogen and total phosphorus, nearly double the proportion of mountain lakes are in good condition compared to non-mountain lakes. Finally, microcystin detection is far less prevalent in mountain lakes compared to non-mountain lakes.
+
+```{r condition figure, echo = F, message = F, warning = F}
+#| label: fig-condition
+#| fig-cap: The mean estimate and 95% confidence interval of the proportion of the population within each condition category for mountain (Mtn) and non-mountain (Non) lakes for the conterminous US with respect to trophic status (TROPH), chlorophyll-a (CHL-A), benthic macroinvertebrates (BMI), littoral cover (LC), lake habitat complexity (LHC), riparian vegetation (RV), lakeshore disturbance (LSD), acid neutralizing capacity (ANC), dissolved oxygen (DO), total nitrogen (TN), total phosphorus (TP), and microcystin (MICX).
+#| fig-height: 7.5
+#| fig-width: 6.5
+
+# Order the condition categories and create category codes that will be used to color the plots.
+mtn_all <- cond %>%
+  filter(Category != "Total") %>%
+  mutate(Category = factor(Category, levels = c("Not Assessed",
+                                                "Detected",
+                                                "Not Detected",
+                                                "At or Below Benchmark",
+                                                "Above Benchmark",
+                                                "Poor", 
+                                                "Fair", 
+                                                "Good", 
+                                                "Low", 
+                                                "Moderate", 
+                                                "High", 
+                                                "LOW", 
+                                                "MODERATE", 
+                                                "HIGH", 
+                                                "Low (<=3 ppm)", 
+                                                "Moderate (>3 - <5 ppm)",
+                                                "High (>=5 ppm)", 
+                                                "Hypereutrophic",
+                                                "Eutrophic",
+                                                "Mesotrophic",
+                                                "Oligotrophic"))) %>%
+  mutate(Subpopulation = factor(Subpopulation, 
+                                levels = unique(cond$Subpopulation),
+                                labels = c("Mountain", "Non-Mountain", "All Lakes")),
+         Threshold = factor(Type)) |>
+  mutate(category_code = case_when(Category == "Not Assessed" ~ 'c0',
+                                   Category == "Poor" ~ 'c2',
+                                   Category == 'Fair' ~ 'c3',
+                                   Category == "Good" ~ 'c4',
+                                   Category == "HIGH" ~ 'c2',
+                                   Category == 'MODERATE' ~ 'c3',
+                                   Category == "LOW" ~ 'c4',
+                                   Category == "High" ~ 'c2',
+                                   Category == 'Moderate' ~ 'c3',
+                                   Category == "Low" ~ 'c4',
+                                   Category == "Low (<=3 ppm)" ~ 'c2',
+                                   Category == 'Moderate (>3 - <5 ppm)' ~ 'c3',
+                                   Category == "High (>=5 ppm)" ~ 'c4',
+                                   Category == 'Hypereutrophic' ~ 'c1',
+                                   Category == 'Eutrophic' ~ 'c2',
+                                   Category == 'Mesotrophic' ~ 'c3',
+                                   Category == 'Oligotrophic' ~ 'c4',
+                                   Category == 'Detected' ~ 'c2',
+                                   Category == 'Not Detected' ~ 'c4',
+                                   Category == "At or Below Benchmark" ~ 'c4',
+                                   Category == "Above Benchmark" ~ 'c2')) %>%
+  mutate(category_code = as.factor(category_code)) %>%
+  mutate(color_hex = case_when(category_code == 'c0' ~ '#808080',
+                               category_code == 'c1' ~ '#984ea3',
+                               category_code == 'c2' ~ '#e41a1c',
+                               category_code == 'c3' ~ '#f0c016',
+                               category_code == 'c4' ~ '#4daf4a')) %>%
+  mutate(color_hex = factor(color_hex, levels = c('#808080', '#984ea3','#e41a1c','#f0c016','#4daf4a'))) %>%
+  filter(!Indicator %in% c("CYNX_REC", 'WHO_MICX_COND', "MICX_EPA_COND")) |>
+  mutate(Indicator = factor(Indicator, levels = c('TROPHIC_STATE',
+                                                  'CHLA_COND',
+                                                  'BENT_MMI_COND_2017',
+                                                  'LITCVR_COND',
+                                                  'RVEG_COND',
+                                                  'LITRIPCVR_COND',
+                                                  'RDIS_COND',
+                                                  'ACID_COND',
+                                                  'DIS_O2_CLS',
+                                                  'NTL_COND',
+                                                  'PTL_COND',
+                                                  'MICX_DETECT')))
+
+# Make facet labels that are abbreviated
+facet_labs_abr <- c('ACID_COND' = 'ANC', 
+                'DIS_O2_CLS' = 'DO',
+                'PTL_COND' = 'TP',
+                'NTL_COND' = 'TN',
+                'CHLA_COND' = 'CHL-A',
+                'MICX_DETECT' = 'MICX',
+                'TROPHIC_STATE' = 'TROPH',
+                'BENT_MMI_COND_2017' = 'BMI',
+                'LITRIPCVR_COND' = 'LHC',
+                'LITCVR_COND' = 'LC',
+                'RVEG_COND' = 'RV',
+                'RDIS_COND' = 'LSD')
+
+# For now, remove the not-assessed category
+mtn_gfp <- mtn_all |>
+  filter(category_code != "c0") |>
+  filter(Type != "NATIONAL") |>
+  mutate(Subpopulation = factor(case_when(Subpopulation == "Non-Mountain" ~ "Non",
+                                          Subpopulation == "Mountain" ~ "Mtn"), 
+                                levels = c("Non", "Mtn"))) |>
+  mutate(category_code = factor(category_code, levels = c("c4", "c3", "c2", "c1", "c0")),
+         color_hex = factor(color_hex, levels = c('#4daf4a', '#f0c016', '#e41a1c', '#984ea3', '#808080')))
+
+cond_labs <- c("c4" = "Good", "c3" = "Fair", "c2" = "Poor")
+
+# Main part of the figure are indicators that follow the good, fair, poor
+gfp <- mtn_gfp |>
+  filter(category_code != "c1") |>
+  filter(!Indicator %in% c("MICX_DETECT", "TROPHIC_STATE")) |>
+  ggplot() + 
+  geom_bar(stat = "identity", aes(x = Subpopulation, y = Estimate.P, fill = category_code)) +
+  geom_errorbar(aes(x = Subpopulation, ymin = LCB95Pct.P, ymax = UCB95Pct.P), width = .2) +
+  facet_grid(Indicator ~ category_code, switch = "y", labeller = labeller(Indicator = facet_labs_abr, category_code = cond_labs)) +
+  coord_flip() +
+  scale_fill_manual(breaks = c("c4", "c3", "c2"),
+                    labels = c("Good", "Fair", "Poor"),
+                    values = c('#4daf4a', '#f0c016', '#e41a1c'),
+                    guide = guide_legend(reverse = FALSE),
+                    name = "Condition") +
+  ylab("Percent of Lakes") +
+  xlab("Indicator & Subpopulation") +
+  theme(legend.position = "none")
+
+# Plot of trophic status
+troph_labs <- c("c4" = "Oligotrophic", "c3" = "Mesotrophic", "c2" = "Eutrophic", "c1" = "Hypereutrophic")
+
+troph <- ggplot(filter(mtn_gfp, Indicator == "TROPHIC_STATE")) + 
+  geom_bar(stat = "identity", aes(x = Subpopulation, y = Estimate.P, fill = category_code)) +
+  geom_errorbar(aes(x = Subpopulation, ymin = LCB95Pct.P, ymax = UCB95Pct.P), width = .2) +
+  facet_grid(Indicator ~ category_code, switch = "y", labeller = labeller(Indicator = facet_labs_abr, category_code = troph_labs)) +
+  coord_flip() +
+  scale_fill_manual(breaks = c("c4", "c3", "c2", "c1"),
+                    labels = c("Oligotrophic", "Mesotrophic", "Eutrophic", "Hypereutrophic"),
+                    values = c('#4daf4a', '#f0c016', '#e41a1c', '#984ea3'),
+                    guide = guide_legend(reverse = FALSE),
+                    name = "Condition") +
+  ylab("Percent of Lakes") +
+  ylim(0, 100) +
+  xlab("Indicator & Subpopulation") +
+  theme(legend.position = "none")
+
+# Plot of microcystin detections
+micx_labs <- c("c4" = "Not-Detected", "c2" = "Detected")
+
+micx <- ggplot(filter(mtn_gfp, Indicator == "MICX_DETECT")) + 
+  geom_bar(stat = "identity", aes(x = Subpopulation, y = Estimate.P, fill = category_code)) +
+  geom_errorbar(aes(x = Subpopulation, ymin = LCB95Pct.P, ymax = UCB95Pct.P), width = .2) +
+  facet_grid(Indicator ~ category_code, switch = "y", labeller = labeller(Indicator = facet_labs_abr, category_code = micx_labs)) +
+  coord_flip() +
+  scale_fill_manual(breaks = c("c4", "c2"),
+                    labels = c("Not-Detected", "Detected"),
+                    values = c('#4daf4a', '#e41a1c'),
+                    guide = guide_legend(reverse = FALSE),
+                    name = "Condition") +
+  ylab("Percent of Lakes") +
+  ylim(0, 100) +
+  xlab("Indicator & Subpopulation") +
+  theme(legend.position = "none")
+
+# Arrange into one master figure
+ggarrange(plotlist = list(troph + rremove("xlab") + rremove("ylab"), gfp + rremove("xlab") + rremove("ylab"), micx + rremove("ylab")), nrow = 3, ncol = 1, heights = c(0.9, 4.3, 1))
+
+```
+
+## Supplemental Information
+
+Contents
+
+-   Figures S1-S3
+
+-   Table S1
+
+```{r reference condition figure, warning = FALSE, echo = F}
+#| label: fig-ref-cond
+#| fig-cap: Reference site total phosphorus concentration (a) is used to calculate the 75th and 95th percentiles. The 75th percentile is the boundary between good and fair (dotted line) condition while the 95th percentile is the boundary between fair and poor condition (solid line). These benchmarks are then used to assign condition categories to sampled lakes (b).
+#| fig-height: 5
+#| fig-width: 5
+
+ref <- rnorm(75, mean = 15, sd = 5)
+
+ref <- tibble(site = "ref", dat = rnorm(150, mean = 20, sd = 7))
+
+perc75 <- quantile(ref$dat, 0.75)
+perc95 <- quantile(ref$dat, 0.95)
+
+samp <- tibble(site = "samp", dat = rexp(150, rate = 0.02)) |>
+  mutate(Condition = case_when(dat < perc75 ~ "Good",
+                         dat >= perc75 & dat < perc95 ~ "Fair",
+                         dat >= perc95 ~ "Poor"),
+         Condition = factor(Condition, levels = c("Good", "Fair", "Poor")))
+
+pref <- ggplot(ref) +
+  geom_jitter(aes(x = site, y = dat), alpha = 0.5, width = 0.2) +
+  coord_flip() +
+  ylim(0, 300) +
+  xlab("Reference Lakes") +
+  geom_abline(intercept = perc75, lty = "dotted", lwd = 1) + 
+  geom_abline(intercept = perc95, lwd = 1) +
+  theme(axis.text.y = element_blank(),
+        axis.ticks.y = element_blank()) +
+  ylab(" ")
+
+pdat <- ggplot(samp) +
+  geom_abline(intercept = perc75, lty = "dotted", lwd = 1) + 
+  geom_abline(intercept = perc95, lwd = 1) +
+  geom_jitter(aes(x = site, y = dat, color = Condition), alpha = 0.75, width = 0.2) +
+  scale_color_manual(values = c('#4daf4a', '#f0c016', '#e41a1c')) +
+  coord_flip() +
+  ylim(0, 300) +
+  ylab("Total Phosphorus") +
+  xlab("Sample Data") +
+  theme(axis.text.y = element_blank(),
+        axis.ticks.y = element_blank())
+
+ggarrange(plotlist = list(pref, pdat), ncol = 1, 
+          common.legend = TRUE,legend = "bottom",
+          labels = "auto")
+
+
+```
+
+```{r source data, echo = F}
+#| label: tbl-data-source
+#| tbl-cap: Lake, catchment, and watershed characteristics and associated data sources.
+
+data_type <- c("Lake area",
+               "Elevation",
+               "Maximum depth",
+               "Watershed area",
+               "Mean slope",
+               "Developed land",
+               "Agricultural land",
+               "Forested land",
+               "Perennial snow/ice cover",
+               "Building count",
+               "Hydraulic conductivity",
+               "Runoff",
+               "Depth to bedrock")
+
+scale <- c(rep("Lake", 3),
+           rep("Watershed", 2),
+           "Watershed Catchment",
+           rep("Watershed", 3),
+           rep("Catchment", 4))
+
+units <- c("Square kilometers",
+           "Meters",
+           "Meters",
+           "Square kilometers",
+           "Degrees",
+           rep("Percent", 4),
+           "Buildings per square kilometer",
+           "Centimeters per second",
+           "Millimeters per year",
+           "Meters")
+
+source <- c("NHDPlusV2",
+            "elevatr R package",
+            "National Lakes Assessment",
+            "LakeCat",
+            "elevatr R package",
+            rep("NLCD 2011", 4),
+            "Microsoft Building Footprints",
+            rep("LakeCat", 3))
+
+citation <- c("McKay et al., 2012",
+              "Hollister, 2023",
+              "US EPA, 2023",
+              "Hill et al., 2018",
+              "Hollister, 2023",
+              "Dewitz and US Geological Survey, 2024",
+              rep("Yang et al., 2018", 3),
+              "Microsoft 2018",
+              rep("Hill et al., 2018", 3))
+
+source_data <- tibble(data_type, scale, units, source, citation)
+
+kable(source_data, col.names = c("Data Type", "Scale", "Units", "Source", "Citation"))
+
+```
+
+```{r condition based on thresholds, echo = F, message = F, warning = F}
+#| label: fig-threshold-cond
+#| fig-cap: The estimated percent of the lake population within each condition category for mountain and non-mountain lakes according to different thresholds for mountain area in the lake catchment. Indicators include trophic status (TROPH), chlorophyll-a (CHL-A), benthic macroinvertebrates (BMI), littoral cover (LC), lake habitat complexity (LHC), riparian vegetation (RV), lakeshore disturbance (LSD), acid neutralizing capacity (ANC), dissolved oxygen (DO), total nitrogen (TN), total phosphorus (TP), and microcystin (MICX). Error bars represent the 95% confidence interval
+#| fig-height: 10
+#| fig-width: 7.5
+
+mtn_intro <- th_cond %>%
+  filter(Category != "Total") %>%
+  filter(!Type == "NATIONAL") |>
+  mutate(Category = factor(Category, levels = c("Not Assessed",
+                                                "Detected",
+                                                "Not Detected",
+                                                "At or Below Benchmark",
+                                                "Above Benchmark",
+                                                "Poor", 
+                                                "Fair", 
+                                                "Good", 
+                                                "Low", 
+                                                "Moderate", 
+                                                "High", 
+                                                "LOW", 
+                                                "MODERATE", 
+                                                "HIGH", 
+                                                "Low (<=3 ppm)", 
+                                                "Moderate (>3 - <5 ppm)",
+                                                "High (>=5 ppm)", 
+                                                "Hypereutrophic",
+                                                "Eutrophic",
+                                                "Mesotrophic",
+                                                "Oligotrophic"))) %>%
+  mutate(Subpopulation = factor(Subpopulation, 
+                                levels = c("MTN_LAKE", "NOT_MTN_LAKE"),
+                                labels = c("Mountain", "Non-Mountain")),
+         Threshold = factor(Type)) |>
+  mutate(category_code = case_when(Category == "Not Assessed" ~ 'c0',
+                                   Category == "Poor" ~ 'c2',
+                                   Category == 'Fair' ~ 'c3',
+                                   Category == "Good" ~ 'c4',
+                                   Category == "HIGH" ~ 'c2',
+                                   Category == 'MODERATE' ~ 'c3',
+                                   Category == "LOW" ~ 'c4',
+                                   Category == "High" ~ 'c2',
+                                   Category == 'Moderate' ~ 'c3',
+                                   Category == "Low" ~ 'c4',
+                                   Category == "Low (<=3 ppm)" ~ 'c2',
+                                   Category == 'Moderate (>3 - <5 ppm)' ~ 'c3',
+                                   Category == "High (>=5 ppm)" ~ 'c4',
+                                   Category == 'Hypereutrophic' ~ 'c1',
+                                   Category == 'Eutrophic' ~ 'c2',
+                                   Category == 'Mesotrophic' ~ 'c3',
+                                   Category == 'Oligotrophic' ~ 'c4',
+                                   Category == 'Detected' ~ 'c2',
+                                   Category == 'Not Detected' ~ 'c4',
+                                   Category == "At or Below Benchmark" ~ 'c4',
+                                   Category == "Above Benchmark" ~ 'c2')) %>%
+  mutate(category_code = as.factor(category_code)) %>%
+  mutate(color_hex = case_when(category_code == 'c0' ~ '#808080',
+                               category_code == 'c1' ~ '#984ea3',
+                               category_code == 'c2' ~ '#e41a1c',
+                               category_code == 'c3' ~ '#f0c016',
+                               category_code == 'c4' ~ '#4daf4a')) %>%
+  mutate(color_hex = factor(color_hex, levels = c('#808080', '#984ea3','#e41a1c','#f0c016','#4daf4a'))) %>%
+  filter(!Indicator %in% c("CYNX_REC", 'WHO_MICX_COND', 'MICX_EPA_COND')) |>
+  mutate(Indicator = factor(Indicator, levels = c("TROPHIC_STATE", 
+                                                  "CHLA_COND",
+                                                  "BENT_MMI_COND_2017",
+                                                  "LITCVR_COND",
+                                                  "RVEG_COND",
+                                                  "LITRIPCVR_COND",
+                                                  "RDIS_COND",
+                                                  "ACID_COND", 
+                                                  "DIS_O2_CLS",
+                                                  "NTL_COND", 
+                                                  "PTL_COND",
+                                                  "MICX_DETECT"))) |>
+  filter(category_code != 'c0')
+
+th_plots <- lapply(c(1,5,9), function(i){
+  levs <- levels(mtn_intro$Indicator)[i:(i+3)]
+  dat <- filter(mtn_intro, Indicator %in% levs)
+  
+  ggplot(dat, aes(x = Threshold, y = Estimate.P, fill = category_code)) + 
+    geom_bar(stat = "identity", position = position_stack(reverse = FALSE), width = 0.70) +
+    facet_grid(Subpopulation ~ Indicator, labeller = labeller(Indicator = facet_labs_abr)) +
+    scale_fill_manual(breaks = levels(mtn_intro$category_code),
+                      values = levels(mtn_intro$color_hex),
+                      guide = guide_legend(reverse = TRUE),
+                      name = "Condition") +
+    scale_x_discrete(labels = c("1%", "5%", "10%", "25%")) +
+    ylim(0, 100.1) +
+    coord_flip() +
+    ylab("Percent of Lakes") +
+    xlab("Threshold") +
+    theme(legend.position = "none")
+})
+
+data_plots <- ggarrange(plotlist = list(th_plots[[1]] + rremove("xlab"), 
+                          th_plots[[2]] + rremove("xlab"), 
+                          th_plots[[3]]), nrow = 3, ncol = 1)
+
+# Get the legends
+troph_legend <- get_legend(ggplot(filter(mtn_intro, Indicator == "TROPHIC_STATE"), 
+       aes(x = Threshold, y = Estimate.P, fill = category_code)) + 
+  geom_bar(stat = "identity", position = position_stack(reverse = FALSE), width = 0.70) +
+  scale_fill_manual(breaks = c("c1", "c2", "c3", "c4"),
+                    values = c("#984ea3", "#e41a1c", "#f0c016", "#4daf4a"),
+                    labels = c("Hypereutrophic", "Eutrophic", "Mesotrophic", "Oligotrophic"),
+                    guide = guide_legend(reverse = TRUE),
+                    name = "TROPH Condition"))
+
+micx_legend <- get_legend(ggplot(filter(mtn_intro, Indicator == "MICX_DETECT"), 
+       aes(x = Threshold, y = Estimate.P, fill = category_code)) + 
+  geom_bar(stat = "identity", position = position_stack(reverse = FALSE), width = 0.70) +
+  scale_fill_manual(breaks = c("c2", "c4"),
+                    values = c("#e41a1c", "#4daf4a"),
+                    labels = c("Detect", "Non-Detect"),
+                    guide = guide_legend(reverse = TRUE),
+                    name = "MICX Condition"))
+
+gfp_legend <- get_legend(ggplot(filter(mtn_intro, Indicator == "CHLA_COND"), 
+       aes(x = Threshold, y = Estimate.P, fill = category_code)) + 
+  geom_bar(stat = "identity", position = position_stack(reverse = FALSE), width = 0.70) +
+  scale_fill_manual(breaks = c("c2", "c3", "c4"),
+                    values = c("#e41a1c", "#f0c016", "#4daf4a"),
+                    labels = c("Poor", "Fair", "Good"),
+                    guide = guide_legend(reverse = TRUE),
+                    name = "Condition"))
+
+legends <- ggarrange(plotlist = list(troph_legend, gfp_legend, micx_legend), ncol = 1, align = "v")
+
+ggarrange(plotlist = list(data_plots, legends), ncol = 2, widths = c(4, 1))
+
+```
+
+```{r condition including all lakes, echo = F, message = F, warning = F}
+#| label: fig-all-condition
+#| fig-cap: The mean estimate ± 95% confidence interval of the proportion of the population within each condition category for mountain (Mtn), non-mountain (Non), and all lakes (Mtn + Non; All) for the conterminous US with respect to trophic status (TROPH), chlorophyll-a (CHL-A), benthic macroinvertebrates (BMI), littoral cover (LC), lake habitat complexity (LHC), riparian vegetation (RV), lakeshore disturbance (LSD), acid neutralizing capacity (ANC), dissolved oxygen (DO), total nitrogen (TN), total phosphorus (TP), and microcystin (MICX).
+#| fig-height: 10
+#| fig-width: 6.5
+
+# For now, remove the not-assessed category
+mtn_gfp <- mtn_all |>
+  filter(category_code != "c0") |>
+  mutate(Subpopulation = factor(case_when(Subpopulation == "Non-Mountain" ~ "Non",
+                                          Subpopulation == "Mountain" ~ "Mtn",
+                                          Subpopulation == "All Lakes" ~ "All"), 
+                                levels = c("All", "Non", "Mtn"))) |>
+  mutate(category_code = factor(category_code, levels = c("c4", "c3", "c2", "c1", "c0")),
+         color_hex = factor(color_hex, levels = c('#4daf4a', '#f0c016', '#e41a1c', '#984ea3', '#808080')))
+
+cond_labs <- c("c4" = "Good", "c3" = "Fair", "c2" = "Poor")
+
+# Main part of the figure are indicators that follow the good, fair, poor
+gfp <- mtn_gfp |>
+  filter(category_code != "c1") |>
+  filter(!Indicator %in% c("MICX_EPA_COND", "MICX_DETECT", "TROPHIC_STATE")) |>
+  ggplot() + 
+  geom_bar(stat = "identity", aes(x = Subpopulation, y = Estimate.P, fill = category_code)) +
+  geom_errorbar(aes(x = Subpopulation, ymin = LCB95Pct.P, ymax = UCB95Pct.P), width = .2) +
+  facet_grid(Indicator ~ category_code, switch = "y", labeller = labeller(Indicator = facet_labs_abr, category_code = cond_labs)) +
+  coord_flip() +
+  scale_fill_manual(breaks = c("c4", "c3", "c2"),
+                    labels = c("Good", "Fair", "Poor"),
+                    values = c('#4daf4a', '#f0c016', '#e41a1c'),
+                    guide = guide_legend(reverse = FALSE),
+                    name = "Condition") +
+  ylab("Percent of Lakes") +
+  xlab("Indicator & Subpopulation") +
+  theme(legend.position = "none")
+
+# Plot of trophic status
+troph_labs <- c("c4" = "Oligotrophic", "c3" = "Mesotrophic", "c2" = "Eutrophic", "c1" = "Hypereutrophic")
+
+troph <- ggplot(filter(mtn_gfp, Indicator == "TROPHIC_STATE")) + 
+  geom_bar(stat = "identity", aes(x = Subpopulation, y = Estimate.P, fill = category_code)) +
+  geom_errorbar(aes(x = Subpopulation, ymin = LCB95Pct.P, ymax = UCB95Pct.P), width = .2) +
+  facet_grid(Indicator ~ category_code, switch = "y", labeller = labeller(Indicator = facet_labs_abr, category_code = troph_labs)) +
+  coord_flip() +
+  scale_fill_manual(breaks = c("c4", "c3", "c2", "c1"),
+                    labels = c("Oligotrophic", "Mesotrophic", "Eutrophic", "Hypereutrophic"),
+                    values = c('#4daf4a', '#f0c016', '#e41a1c', '#984ea3'),
+                    guide = guide_legend(reverse = FALSE),
+                    name = "Condition") +
+  ylab("Percent of Lakes") +
+  ylim(0, 100) +
+  xlab("Indicator & Subpopulation") +
+  theme(legend.position = "none")
+
+# Plot of microcystin detections
+micx_labs <- c("c4" = "Not-Detected", "c2" = "Detected")
+
+micx <- ggplot(filter(mtn_gfp, Indicator == "MICX_DETECT")) + 
+  geom_bar(stat = "identity", aes(x = Subpopulation, y = Estimate.P, fill = category_code)) +
+  geom_errorbar(aes(x = Subpopulation, ymin = LCB95Pct.P, ymax = UCB95Pct.P), width = .2) +
+  facet_grid(Indicator ~ category_code, switch = "y", labeller = labeller(Indicator = facet_labs_abr, category_code = micx_labs)) +
+  coord_flip() +
+  scale_fill_manual(breaks = c("c4", "c2"),
+                    labels = c("Not-Detected", "Detected"),
+                    values = c('#4daf4a', '#e41a1c'),
+                    guide = guide_legend(reverse = FALSE),
+                    name = "Condition") +
+  ylab("Percent of Lakes") +
+  ylim(0, 100) +
+  xlab("Indicator & Subpopulation") +
+  theme(legend.position = "none")
+
+# Arrange into one master figure
+ggarrange(plotlist = list(troph + rremove("xlab") + rremove("ylab"), 
+                          gfp + rremove("xlab") + rremove("ylab"), 
+                          micx + rremove("ylab")), 
+          nrow = 3, ncol = 1, heights = c(1.0, 6.45, 1.25))
+```
+
+## Graphical Abstract Components
+
+```{r mtn lake map mini, echo = FALSE}
+ggplot() + 
+  geom_sf(data = conus, fill = "#EBEBEB", color = "black", size = 0.5) +
+  geom_sf(data = mtn, shape = 21, aes(fill = desig), size = 0.75, stroke = .1) +
+  scale_fill_manual(breaks = levels(mtn$desig),
+                    name = "Lake Type",
+                    values =  c("#009AA3", "#ED7D31"),
+                    labels = c("Mountain", "Non-Mountain")) +
+  theme_void() +
+  theme(legend.position = "bottom")
+
+# ggsave(paste0(here(), "/figures/mtnlakes_map_mini.png"), height = 5, width = 5, units = "cm", dpi = 600)
+
+```
+
+```{r graphical abstract indicators, echo = FALSE}
+# Total P, lakeshore disturbance, benthic macroinvertrbrates
+abs_inds <- c("PTL_COND", "RDIS_COND", "BENT_MMI_COND_2017")
+
+abs_labs <- c('PTL_COND' = 'Total Phosphorus',
+              'BENT_MMI_COND_2017' = 'Benthic Macroinvertebrates',
+              'RDIS_COND' = 'Lakeshore Disturbance')
+
+mtn_gfp |>
+  filter(category_code != "c1") |>
+  filter(Indicator %in% abs_inds) |>
+  mutate(Indicator = factor(Indicator, levels = c('PTL_COND', 'BENT_MMI_COND_2017', 'RDIS_COND'))) |>
+  ggplot() + 
+  geom_bar(stat = "identity", 
+           aes(x = Subpopulation, y = Estimate.P, fill = category_code),
+           position = position_stack(reverse = TRUE), 
+           width = 0.60) +
+  facet_wrap(~Indicator, nrow = 3, ncol = 1,
+             labeller = labeller(Indicator = abs_labs)) +
+  coord_flip() +
+  scale_fill_manual(breaks = c("c4", "c3", "c2"),
+                    labels = c("Good", "Fair", "Poor"),
+                    values = c('#4daf4a', '#f0c016', '#e41a1c'),
+                    guide = guide_legend(reverse = FALSE),
+                    name = "Condition") +
+  ylab("Lake Population (%)") +
+  xlab("Subpopulation")
+
+# ggsave(paste0(here(), "/figures/condition_mini.png"), height = 3, width = 4, units = "in", dpi = 600)
+
+```
