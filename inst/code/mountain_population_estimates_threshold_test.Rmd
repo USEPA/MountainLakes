@@ -1,0 +1,177 @@
+---
+title: "Mountain Lake Population Estimates"
+author: "Michael Dumelle"
+output:
+  html_document:
+    theme: flatly
+    number_sections: true
+    highlighted: default 
+    toc: yes
+    toc_float:
+      collapsed: no
+      smooth_scroll: no
+    toc_depth: 3
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup, include = FALSE}
+knitr::opts_chunk$set(
+  collapse = TRUE,
+  comment = "#>", 
+  warning = FALSE, 
+  message = FALSE,
+  include = TRUE, 
+  echo = TRUE
+)
+options(knitr.duplicate.label = "allow")
+```
+
+# Purpose
+Calculate condition class estimates for the NLA 2007, 2012, and 2017 combined survey on November 30, 2023 to include mountain lakes.
+
+# History
+Created: November 30, 2023
+
+# Preliminaries
+
+```{r, results = "hide"}
+library(spsurvey)
+library(tidyverse)
+library(furrr)
+library(here)
+```
+
+## Reading in Data and Joining
+
+```{r}
+# location in project
+path <- here("inst", "data", "NLA_sample_weights_combined_07-12-17.csv")
+
+# read in NLA combined data
+cond_old <- readr::read_csv(path) %>%
+  dplyr::mutate(NATIONAL = "NATIONAL") %>% 
+  # there is only 1 visit (all visit_no - 1)
+  dplyr::select(sort(tidyselect::peek_vars())) 
+
+# read in NLA mountain lake designations
+mtn_path <- here("inst", "data", "NLA_mountain_lake_designation_catchment_without_lake.csv")
+mtn <- readr::read_csv(mtn_path)
+
+# join the combined data and lake designations
+cond <- left_join(cond_old, mtn)
+
+# have mountain lake designation not sampled NLA
+mtn_yes_nla_no <- anti_join(mtn, cond_old)$UNIQUE_ID
+
+# sampled NLA no mountain lake designation
+mtn_no_nla_yes <- anti_join(cond_old, mtn)$UNIQUE_ID
+
+# filter out mtn no
+cond <- cond %>%
+  filter(!UNIQUE_ID %in% mtn_no_nla_yes)
+
+# mountain lake designation and sampled NLA
+mtn_yes_nla_yes <- cond$UNIQUE_ID
+
+# make data set
+mismatch <- bind_rows(
+  tibble(UNIQUE_ID = mtn_yes_nla_no, in_NLA = FALSE, in_mtn = TRUE),
+  tibble(UNIQUE_ID = mtn_no_nla_yes, in_NLA = TRUE, in_mtn = FALSE),
+  tibble(UNIQUE_ID = mtn_yes_nla_yes, in_NLA = TRUE, in_mtn = TRUE)
+)
+write_csv(mismatch, here("inst", "data", "NLA_MTN_mismatch_11-30-2023.csv"))
+```
+
+# Analysis
+
+## Variable Prep
+
+```{r}
+indicators <- c("ACID_COND", "DIS_O2_CLS", "PTL_COND", "NTL_COND", "CHLA_COND",
+                "CYNX_REC", "MICX_EPA_COND", "MICX_DETECT",  "WHO_MICX_COND",
+                "TROPHIC_STATE", "BENT_MMI_COND_2017", "LITRIPCVR_COND",
+                "LITCVR_COND", "RVEG_COND", "RDIS_COND")
+
+subpops <- c("MOUNTAIN_01PCT", "MOUNTAIN_05PCT", "MOUNTAIN_10PCT", "MOUNTAIN_25PCT",
+             "NATIONAL")
+
+vargrid <- tidyr::expand_grid(indicators, subpops)
+```
+
+## Summarizing Data
+
+```{r}
+spsurvey::sp_summary(cond, ~ .)
+```
+
+## Analyzing Data
+
+```{r}
+cond_estimate <- function(indicator, subpop, dframe) {
+  conds <- spsurvey::cat_analysis(
+    dframe = dframe,
+    vars = indicator,
+    subpops = subpop,
+    weight = "WGT_TP",
+    siteID = "SITE_ID",
+    xcoord = "XCOORD",
+    ycoord = "YCOORD"
+  )
+  if (exists("warn_df")) {
+    warnprnt()
+  }
+  conds
+}
+```
+
+```{r}
+# Set a "plan" for how the code should run.
+future::plan(multisession, workers = 15)
+
+# Run the code
+cond_out <- purrr::transpose(furrr::future_pmap(list(vargrid$indicators, vargrid$subpops), purrr::safely(cond_estimate), dframe = cond, .options = furrr_options(seed = TRUE)))
+
+# see which had errors
+is_error <- !purrr::map_lgl(cond_out$error, is.null)
+
+# how many errors?
+sum(is_error)
+
+# what are they? (if there are any)
+if (sum(is_error) > 0) {
+  cond_out$error[is_error]
+}
+
+# save results
+results <- cond_out$result[!is_error] %>%
+  dplyr::bind_rows()
+```
+
+## Write out data
+
+```{r}
+readr::write_csv(
+  x = results,
+  file = here("inst", "data", "mountain_population_estimates_threshold_test.csv")
+  )
+```
+
+# Session information
+
+```{r}
+Sys.time()
+sessionInfo()
+```
+
+## Purl
+
+```{r}
+# run this is console
+# save .Rmd as R script
+knitr::purl(
+  input = here("population_estimates", "11-30-2023", "mountain_population_estimates_11-30-2023.Rmd"),
+  output = here("population_estimates", "11-30-2023", "mountain_population_estimates_11-30-2023.R"),
+  documentation = 2
+)
+```
