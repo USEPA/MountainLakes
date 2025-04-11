@@ -1,7 +1,7 @@
 #' A compilation of example mountain lakes in the US
 #'
 #' A dataframe containing lake names and location information for lakes that 
-#' have been identified as mountain lakes in published literature.
+#' have been identified as mountain lakes in published literature. 
 #'
 #' @format A dataframe with 19 rows and 5 variables:
 #' \describe{
@@ -103,7 +103,8 @@
 #' Lakes that have at least 5% of their LakeCat defined catchment that is mountain landform
 #' are defined as mountain lakes. Population weights are based on a combination of the 2007,
 #' 2012, and 2017 lakes sampled in the National Lakes Assessment. Produced with spsurvey package. 
-#' See the IdentifyMountainLakes.Rmd script to learn how mountain lakes are identified
+#' See the IdentifyMountainLakes.Rmd script to learn how mountain lakes are identified. See 
+#' mountain_population_estimates_threshold_test.Rmd for generating the population estimates.
 #'
 #' @format A data frame with 216 rows and 15 variables:
 #' \describe{
@@ -137,7 +138,8 @@
 #' of their LakeCat defined catchment that is mountain landform. Population weights are based 
 #' on a combination of the 2007, 2012, and 2017 lakes sampled in the National Lakes Assessment. 
 #' Produced with spsurvey package. See the IdentifyMountainLakes.Rmd script to learn how mountain 
-#' lakes are identified
+#' lakes are identified. See mountain_population_estimates_threshold_test.Rmd for generating 
+#' the population estimates.
 #'
 #' @format A data frame with 675 rows and 15 variables:
 #' \describe{

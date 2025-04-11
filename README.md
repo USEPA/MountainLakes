@@ -1,8 +1,8 @@
 # Mountain Lake Condition in the United States
 
-A supplementary R packed to the publication:
+A supplementary R packed to the article "Ecological condition of mountain lakes in the conterminous United States and vulnerability to human development".
 
-Handler, A. M., Weber, M., Dumelle, M., Jansen, L. S., Carleton, J. N., Schaeffer, B. A., Paulsen, S. G., Barnum, T., Rea, A. W., Neale, A. & Compton, J. E. (2025). Ecological condition of mountain lakes in the conterminous United States and vulnerability to human development. *Ecological Indicators*, *173*, 113402. <https://doi.org/10.1016/j.ecolind.2025.113402>
+Full citation: Handler, A. M., Weber, M., Dumelle, M., Jansen, L. S., Carleton, J. N., Schaeffer, B. A., Paulsen, S. G., Barnum, T., Rea, A. W., Neale, A. & Compton, J. E. (2025). Ecological condition of mountain lakes in the conterminous United States and vulnerability to human development. *Ecological Indicators*, *173*, 113402. <https://doi.org/10.1016/j.ecolind.2025.113402>
 
 For correspondence, please email Amalia Handler: [handler.amalia\@epa.gov](mailto:handler.amalia@epa.gov)
 
@@ -42,6 +42,8 @@ dplyr::glimpse(cond); ?cond
 ## Where multiple thresholds for mountain landform are included
 dplyr::glimpse(th_cond); ?th_cond
 ```
+
+Tabular files in comma separated format and metadata are also available on Data.gov at this [link](https://doi.org/10.23719/1532058).
 
 ### Analysis and Results
 
