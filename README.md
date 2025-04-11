@@ -20,7 +20,7 @@ Run the following to install the supplementary R package
 
 ```{r}
 install.packages("remotes") # if you don't already have remotes installed
-remotes::install_github("amaliahandler/MountainLakes")
+remotes::install_github("USEPA/MountainLakes")
 ```
 
 ### Data Availability
